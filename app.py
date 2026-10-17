@@ -9,13 +9,38 @@ import google.generativeai as genai
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Control de Producción y Metas", page_icon="🚖", layout="wide")
 
-# Configuración de Gemini Vision
-try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
-    vision_model = genai.GenerativeModel("gemini-1.5-flash")
-except Exception:
-    vision_model = genai.GenerativeModel("gemini-1.5-flash-latest")
+# --- CONEXIÓN AUTOMÁTICA A GEMINI ---
+def obtener_modelo_vision():
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        
+        # Obtener lista de modelos compatibles para generación de contenido
+        modelos_disponibles = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        # Prioridad de modelos de visión
+        preferencias = [
+            "models/gemini-1.5-flash",
+            "models/gemini-1.5-flash-latest",
+            "models/gemini-1.5-pro",
+            "models/gemini-2.0-flash",
+            "models/gemini-pro-vision"
+        ]
+        
+        for pref in preferencias:
+            if pref in modelos_disponibles:
+                return genai.GenerativeModel(pref)
+        
+        # Fallback al primer modelo disponible
+        if modelos_disponibles:
+            return genai.GenerativeModel(modelos_disponibles[0])
+        return None
+    except Exception as e:
+        st.error(f"Error al conectar con Gemini: {e}")
+        return None
 
 # --- BASE DE DATOS LOCAL ---
 def init_db():
@@ -47,13 +72,13 @@ def init_db():
 init_db()
 
 # --- FUNCIONES DE EXTRACCIÓN Y CÁLCULO ---
-def extraer_datos_imagen(image):
+def extraer_datos_imagen(image, model):
     prompt = """
-    Analiza esta captura de pantalla de un servicio de taxi/aplicativo.
-    Devuelve ÚNICAMENTE un objeto JSON válido con los siguientes campos exactos:
+    Analiza esta captura de pantalla de un servicio de aplicativo de taxi.
+    Devuelve ÚNICAMENTE un objeto JSON válido (sin bloques de código markdown, solo el texto plano JSON) con las siguientes claves exactas:
     {
         "id_servicio": "número de servicio o ID (string)",
-        "fecha_hora_texto": "fecha y hora tal como aparece en pantalla (string)",
+        "fecha_hora_texto": "fecha y hora tal como aparece (string)",
         "monto_total": 0.0,
         "tarifa_base": 0.0,
         "monto_recargos": 0.0,
@@ -66,20 +91,20 @@ def extraer_datos_imagen(image):
         "tipo_usuario": "Corporativo / Particular",
         "categoria_servicio": "Lite u otro"
     }
-    REGLAS FINANCIERAS:
+    REGLAS FINANCIERAS CRÍTICAS:
     - monto_recargos: suma de dinámica, tiempo de espera, car seat, recargo reserva u horario exclusivo.
     - monto_reembolsos: suma ÚNICAMENTE de peajes y estacionamientos.
-    - monto_total: cobro bruto total mostrado.
-    No agregues texto explicativo ni bloques markdown ```json. Solo el texto JSON crudo.
+    - monto_total: el cobro bruto total mostrado en pantalla.
     """
-    response = vision_model.generate_content([image, prompt])
+    response = model.generate_content([image, prompt])
     raw_text = response.text.strip()
-    if raw_text.startswith("```json"):
-        raw_text = raw_text[7:]
-    if raw_text.startswith("```"):
-        raw_text = raw_text[3:]
-    if raw_text.endswith("```"):
-        raw_text = raw_text[:-3]
+    
+    # Limpieza por si devuelve bloques markdown
+    if "```json" in raw_text:
+        raw_text = raw_text.split("```json")[1].split("```")[0]
+    elif "```" in raw_text:
+        raw_text = raw_text.split("```")[1].split("```")[0]
+        
     return json.loads(raw_text.strip())
 
 def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
@@ -127,12 +152,13 @@ with tab1:
             st.image(img, caption="Captura cargada", use_column_width=True)
         with col_btn:
             if st.button("🔍 Extraer Datos con IA"):
+                vision_model = obtener_modelo_vision()
                 if vision_model is None:
-                    st.error("Falta configurar GEMINI_API_KEY en Secrets de Streamlit.")
+                    st.error("No se pudo conectar con el modelo. Revisa tu GEMINI_API_KEY en Secrets.")
                 else:
-                    with st.spinner("Leyendo captura de pantalla..."):
+                    with st.spinner("Procesando captura con IA..."):
                         try:
-                            datos = extraer_datos_imagen(img)
+                            datos = extraer_datos_imagen(img, vision_model)
                             st.session_state["datos_autocompletados"] = {
                                 "id_servicio": str(datos.get("id_servicio", "")),
                                 "tarifa_base": float(datos.get("tarifa_base", 0.0)),
@@ -145,7 +171,7 @@ with tab1:
                                 "tipo_usuario": datos.get("tipo_usuario", "Corporativo"),
                                 "tipo_asignacion": datos.get("tipo_asignacion", "Reserva")
                             }
-                            st.success("¡Datos extraídos con éxito! Revisa abajo y guarda.")
+                            st.success("¡Datos extraídos! Verifica los campos abajo y presiona Guardar.")
                         except Exception as e:
                             st.error(f"Error al analizar la imagen: {e}")
 
@@ -153,133 +179,4 @@ with tab1:
     with st.form("form_registro"):
         d = st.session_state["datos_autocompletados"]
         st.write("Verifica o completa los datos del servicio:")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            id_servicio = st.text_input("N° de Servicio", value=d["id_servicio"])
-            fecha_input = st.date_input("Fecha del viaje", datetime.now().date())
-            hora_input = st.time_input("Hora del viaje", datetime.now().time())
-            tarifa_base = st.number_input("Tarifa Base (S/)", min_value=0.0, value=d["tarifa_base"], step=1.0)
-            recargos = st.number_input("Recargos / Esperas / Extras (S/)", min_value=0.0, value=d["recargos"], step=1.0)
-            
-        with col2:
-            reembolsos = st.number_input("Peajes / Estacionamiento (S/)", min_value=0.0, value=d["reembolsos"], step=1.0)
-            distancia = st.number_input("Distancia (Km)", min_value=0.0, value=d["distancia"], step=0.1)
-            duracion = st.number_input("Duración (min)", min_value=0.0, value=d["duracion"], step=1.0)
-            origen = st.text_input("Origen", value=d["origen"])
-            destino = st.text_input("Destino", value=d["destino"])
-            tipo_usuario = st.selectbox("Tipo de Usuario", ["Corporativo", "Particular"], index=0 if d["tipo_usuario"] == "Corporativo" else 1)
-            tipo_asignacion = st.selectbox("Tipo Asignación", ["Reserva", "Directo"], index=0 if d["tipo_asignacion"] == "Reserva" else 1)
-
-        produccion_neta = tarifa_base + recargos
-        monto_total = produccion_neta + reembolsos
-        
-        st.info(f"**Producción Neta (Válida para meta):** S/ {produccion_neta:.2f} | **Total con peajes:** S/ {monto_total:.2f}")
-        
-        submitted = st.form_submit_button("💾 Guardar Viaje")
-        
-        if submitted:
-            if not id_servicio:
-                st.error("Debes ingresar el N° de Servicio.")
-            else:
-                dt_viaje = datetime.combine(fecha_input, hora_input)
-                f_op = calcular_fecha_operativa(dt_viaje, tipo_turno, hora_corte)
-                sem_op = obtener_semana_operativa(f_op)
-                
-                conn = sqlite3.connect("produccion_viajes.db")
-                c = conn.cursor()
-                try:
-                    c.execute('''
-                        INSERT OR REPLACE INTO viajes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        id_servicio, dt_viaje.isoformat(), f_op.isoformat(), sem_op,
-                        tipo_asignacion, tipo_usuario, "Lite", origen, destino,
-                        distancia, duracion, tarifa_base, recargos, reembolsos,
-                        produccion_neta, monto_total
-                    ))
-                    conn.commit()
-                    st.success(f"Viaje N° {id_servicio} guardado exitosamente.")
-                except Exception as e:
-                    st.error(f"Error al guardar: {e}")
-                finally:
-                    conn.close()
-
-# --- TAB 2: PANEL SEMANAL ---
-with tab2:
-    st.subheader("Estado de Metas y Bonos")
-    
-    conn = sqlite3.connect("produccion_viajes.db")
-    df = pd.read_sql_query("SELECT * FROM viajes", conn)
-    conn.close()
-    
-    if not df.empty:
-        semanas_disp = df["semana_operativa"].unique()
-        semana_sel = st.selectbox("Seleccionar Semana Operativa", semanas_disp, index=len(semanas_disp)-1)
-        
-        df_sem = df[df["semana_operativa"] == semana_sel]
-        
-        resumen_diario = df_sem.groupby("fecha_operativa").agg(
-            viajes=('id_servicio', 'count'),
-            produccion=('produccion_neta', 'sum'),
-            reembolsos=('monto_reembolsos', 'sum'),
-            km=('distancia_km', 'sum')
-        ).reset_index()
-        
-        dias_trabajados = len(resumen_diario)
-        produccion_total = df_sem["produccion_neta"].sum()
-        viajes_totales = len(df_sem)
-        
-        dias_cumplen_piso = (resumen_diario["produccion"] >= 300.0).sum()
-        piso_ok = (dias_cumplen_piso == dias_trabajados) and (dias_trabajados == regimen)
-        
-        meta_b25 = regimen * 400.0
-        meta_b55 = regimen * 421.0
-        meta_b100 = regimen * 450.0
-        
-        bono_obtenido = 0
-        if piso_ok:
-            if produccion_total >= meta_b100:
-                bono_obtenido = 100
-            elif produccion_total >= meta_b55:
-                bono_obtenido = 55
-            elif produccion_total >= meta_b25:
-                bono_obtenido = 25
-
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.metric("Días Trabajados", f"{dias_trabajados} / {regimen}")
-        col_m2.metric("N° de Viajes", viajes_totales)
-        col_m3.metric("Producción Acumulada", f"S/ {produccion_total:.2f}")
-        col_m4.metric("Bono Semanal", f"S/ {bono_obtenido}.00")
-
-        if dias_trabajados > 0:
-            if dias_cumplen_piso < dias_trabajados:
-                st.error("⚠️ Atención: Hay al menos un día donde no se alcanzaron los S/ 300. Bono bloqueado.")
-            elif dias_trabajados < regimen:
-                st.warning(f"Llevas {dias_trabajados} de {regimen} días cumpliendo el piso de S/ 300.")
-            else:
-                st.success("✅ Cumpliste el piso de S/ 300 en todos los días de tu turno.")
-
-        st.write(f"**Progreso hacia Bono S/ 100 (Meta: S/ {meta_b100:.2f}):**")
-        progreso = min(1.0, produccion_total / meta_b100) if meta_b100 > 0 else 0.0
-        st.progress(progreso)
-        
-        if produccion_total < meta_b100:
-            restante = meta_b100 - produccion_total
-            st.caption(f"Faltan **S/ {restante:.2f}** en la producción para el bono de S/ 100.")
-
-        st.divider()
-        st.subheader("Desglose Diario de la Semana")
-        st.dataframe(resumen_diario, use_container_width=True)
-    else:
-        st.info("Aún no hay viajes registrados.")
-
-# --- TAB 3: HISTORIAL ---
-with tab3:
-    st.subheader("Todos los Viajes Registrados")
-    conn = sqlite3.connect("produccion_viajes.db")
-    df_all = pd.read_sql_query("SELECT * FROM viajes ORDER BY fecha_hora_viaje DESC", conn)
-    conn.close()
-    if not df_all.empty:
-        st.dataframe(df_all, use_container_width=True)
-    else:
-        st.info("No hay registros en la base de datos.")
+        col1, col2 = st.columns
