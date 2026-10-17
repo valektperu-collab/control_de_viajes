@@ -15,7 +15,7 @@ try:
     genai.configure(api_key=api_key)
     vision_model = genai.GenerativeModel("gemini-1.5-flash")
 except Exception:
-    vision_model = None
+    vision_model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
 # --- BASE DE DATOS LOCAL ---
 def init_db():
