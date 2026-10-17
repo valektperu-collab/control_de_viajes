@@ -14,7 +14,6 @@ def obtener_modelo_vision():
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
-        # Usamos el modelo más reciente indicado por la API
         for nombre_modelo in ["gemini-3.8-flash", "gemini-3.5-flash-lite"]:
             try:
                 m = genai.GenerativeModel(nombre_modelo)
@@ -281,13 +280,28 @@ with tab2:
     else:
         st.info("Aún no hay viajes registrados.")
 
-# --- TAB 3: HISTORIAL ---
+# --- TAB 3: HISTORIAL Y GESTIÓN ---
 with tab3:
     st.subheader("Todos los Viajes Registrados")
     conn = sqlite3.connect("produccion_viajes.db")
     df_all = pd.read_sql_query("SELECT * FROM viajes ORDER BY fecha_hora_viaje DESC", conn)
     conn.close()
+    
     if not df_all.empty:
         st.dataframe(df_all, use_container_width=True)
+        
+        st.divider()
+        st.subheader("🗑️ Eliminar un Registro de Prueba")
+        lista_servicios = df_all["id_servicio"].tolist()
+        servicio_a_borrar = st.selectbox("Selecciona el N° de Servicio a eliminar:", lista_servicios)
+        
+        if st.button("❌ Confirmar Eliminación"):
+            conn = sqlite3.connect("produccion_viajes.db")
+            c = conn.cursor()
+            c.execute("DELETE FROM viajes WHERE id_servicio = ?", (servicio_a_borrar,))
+            conn.commit()
+            conn.close()
+            st.success(f"El viaje N° {servicio_a_borrar} fue eliminado correctamente.")
+            st.rerun()
     else:
         st.info("No hay registros en la base de datos.")
