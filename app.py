@@ -237,7 +237,7 @@ with tab1:
                 finally:
                     conn.close()
 
-# --- TAB 2: PANEL SEMANAL & SEMÁFORO ---
+# --- TAB 2: PANEL SEMANAL & SEMÁFORO INTELIGENTE ---
 with tab2:
     conn = sqlite3.connect("produccion_viajes.db")
     df = pd.read_sql_query("SELECT * FROM viajes", conn)
@@ -248,6 +248,7 @@ with tab2:
         semana_sel = st.selectbox("Seleccionar Semana Operativa", semanas_disp)
         df_sem = df[df["semana_operativa"] == semana_sel]
 
+        # Resumen por día operativo
         resumen_diario = df_sem.groupby("fecha_operativa").agg(
             viajes=('id_servicio', 'count'),
             produccion=('produccion_neta', 'sum'),
@@ -255,49 +256,108 @@ with tab2:
             km=('distancia_km', 'sum')
         ).reset_index()
 
+        # Determinar cuál es el día operativo actual en curso
+        ahora = datetime.now()
+        dia_op_hoy = calcular_fecha_operativa(ahora, tipo_turno, hora_corte).isoformat()
+
         dias_trabajados = len(resumen_diario)
         produccion_total = df_sem["produccion_neta"].sum()
         viajes_totales = len(df_sem)
-        dias_restantes = max(0, regimen - dias_trabajados)
 
-        dias_fallan_piso = resumen_diario[resumen_diario["produccion"] < 300.0]
-        tiene_fallas_piso = len(dias_fallan_piso) > 0
+        # Separar días cerrados del día actual en curso
+        dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != dia_op_hoy]
+        dia_en_curso = resumen_diario[resumen_diario["fecha_operativa"] == dia_op_hoy]
 
+        prod_hoy = dia_en_curso["produccion"].values[0] if not dia_en_curso.empty else 0.0
+        falta_piso_hoy = max(0.0, 300.0 - prod_hoy)
+
+        # Evaluar fallas de piso solo en días que ya cerraron
+        dias_fallan_piso_cerrados = dias_cerrados[dias_cerrados["produccion"] < 300.0]
+        tiene_fallas_cerradas = len(dias_fallan_piso_cerrados) > 0
+
+        # Umbrales según régimen
         meta_b25 = regimen * 400.0
         meta_b55 = regimen * 421.0
         meta_b100 = regimen * 450.0
 
-        st.subheader("🎯 Semáforo de Metas: Bono S/ 100")
+        st.subheader("🎯 Estado de Metas y Bonos Semanales")
 
-        if tiene_fallas_piso:
-            st.error(f"🔴 **SEMÁFORO ROJO: BONO BLOQUEADO**\n\nHubo {len(dias_fallan_piso)} día(s) con menos de S/ 300.00. No calificas a bonos esta semana.")
-        elif produccion_total >= meta_b100 and dias_trabajados == regimen:
-            st.success(f"🟢 **SEMÁFORO VERDE: ¡BONO DE S/ 100 ASEGURADO!**\n\nSuperaste la meta de S/ {meta_b100:.2f} con S/ {produccion_total:.2f}.")
-        elif produccion_total >= meta_b55 and dias_trabajados == regimen:
-            st.warning(f"🟡 **SEMÁFORO AMARILLO: BONO DE S/ 55 ALCANZADO**\n\nCerraste en S/ {produccion_total:.2f}. Faltaron S/ {meta_b100 - produccion_total:.2f} para los S/ 100.")
-        elif produccion_total >= meta_b25 and dias_trabajados == regimen:
-            st.warning(f"🟡 **SEMÁFORO AMARILLO: BONO DE S/ 25 ALCANZADO**\n\nCerraste en S/ {produccion_total:.2f}. Faltaron S/ {meta_b100 - produccion_total:.2f} para los S/ 100.")
+        # CASO 1: Ya hay un día cerrado anterior que no llegó a S/ 300
+        if tiene_fallas_cerradas:
+            st.error(
+                f"🔴 **SEMÁFORO ROJO: BONO ANULADO**\n\n"
+                f"El día {dias_fallan_piso_cerrados['fecha_operativa'].values[0]} cerró con menos de S/ 300.00. "
+                "Las reglas de la empresa anulan el bono semanal si algún día cerrado queda por debajo del piso."
+            )
+
+        # CASO 2: Estás trabajando la guardia y aún no hay fallas cerradas
         else:
-            falta_b100 = max(0.0, meta_b100 - produccion_total)
-            if dias_restantes > 0:
-                promedio_necesario = falta_b100 / dias_restantes
-                st.info(f"🟡 **EN CARRERA PARA EL BONO DE S/ 100**\n\nFaltan **S/ {falta_b100:.2f}**. Necesitas un promedio de **S/ {promedio_necesario:.2f} por día** en los {dias_restantes} día(s) restantes.")
+            # Estado del piso diario de hoy
+            if falta_piso_hoy > 0:
+                st.warning(
+                    f"⏳ **GUARDIA EN CURSO - PISO DIARIO:**\n\n"
+                    f"Hoy llevas **S/ {prod_hoy:.2f}**. Te faltan **S/ {falta_piso_hoy:.2f}** para cumplir el piso mínimo de S/ 300 de hoy y no perder la opción a bono."
+                )
             else:
-                st.error("🔴 **SEMÁFORO ROJO:** Se completaron los días del turno sin alcanzar el piso de producción para bonos.")
+                st.success(f"✅ **PISO DE HOY CUMPLIDO:** Llevas S/ {prod_hoy:.2f} hoy (Superaste los S/ 300).")
 
+            # Cuánto falta para cada bono
+            falta_b25 = max(0.0, meta_b25 - produccion_total)
+            falta_b55 = max(0.0, meta_b55 - produccion_total)
+            falta_b100 = max(0.0, meta_b100 - produccion_total)
+
+            col_b1, col_b2, col_b3 = st.columns(3)
+            with col_b1:
+                if falta_b25 == 0:
+                    st.success("🎉 **Bono S/ 25:** ¡ALCANZADO!")
+                else:
+                    st.info(f"🥉 **Para Bono S/ 25:**\nFaltan **S/ {falta_b25:.2f}**")
+
+            with col_b2:
+                if falta_b55 == 0:
+                    st.success("🎉 **Bono S/ 55:** ¡ALCANZADO!")
+                else:
+                    st.info(f"🥈 **Para Bono S/ 55:**\nFaltan **S/ {falta_b55:.2f}**")
+
+            with col_b3:
+                if falta_b100 == 0:
+                    st.success("🔥 **Bono S/ 100:** ¡ALCANZADO!")
+                else:
+                    st.info(f"🥇 **Para Bono S/ 100:**\nFaltan **S/ {falta_b100:.2f}**")
+
+        # Barra de progreso visual hacia los S/ 100
         progreso = min(1.0, produccion_total / meta_b100) if meta_b100 > 0 else 0.0
+        st.write(f"**Progreso total hacia Bono S/ 100 (Meta: S/ {meta_b100:.2f}):**")
         st.progress(progreso)
 
+        # Métricas principales
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.metric("Días Trabajados", f"{dias_trabajados} / {regimen}")
+        col_m1.metric("Días Registrados", f"{dias_trabajados} / {regimen}")
         col_m2.metric("N° Total de Viajes", viajes_totales)
-        col_m3.metric("Producción Neta", f"S/ {produccion_total:.2f}")
-        bono_actual = 100 if (not tiene_fallas_piso and dias_trabajados == regimen and produccion_total >= meta_b100) else (55 if (not tiene_fallas_piso and dias_trabajados == regimen and produccion_total >= meta_b55) else (25 if (not tiene_fallas_piso and dias_trabajados == regimen and produccion_total >= meta_b25) else 0))
-        col_m4.metric("Bono Actual", f"S/ {bono_actual}.00")
+        col_m3.metric("Producción Acumulada", f"S/ {produccion_total:.2f}")
+
+        bono_estimado = 0
+        if not tiene_fallas_cerradas and falta_piso_hoy == 0 and dias_trabajados >= regimen:
+            if produccion_total >= meta_b100:
+                bono_estimado = 100
+            elif produccion_total >= meta_b55:
+                bono_estimado = 55
+            elif produccion_total >= meta_b25:
+                bono_estimado = 25
+        col_m4.metric("Bono Proyectado", f"S/ {bono_estimado}.00")
 
         st.divider()
         st.subheader("📋 Detalle Diario de la Semana")
-        resumen_diario["Estado Piso"] = resumen_diario["produccion"].apply(lambda x: "✅ OK (>=300)" if x >= 300.0 else "❌ Falla (<300)")
+
+        def etiquetar_estado(row):
+            if row["fecha_operativa"] == dia_op_hoy:
+                return f"⏳ En curso (Llevas S/ {row['produccion']:.2f})"
+            elif row["produccion"] >= 300.0:
+                return "✅ Cumplido (>= 300)"
+            else:
+                return "❌ Falló (< 300)"
+
+        resumen_diario["Estado"] = resumen_diario.apply(etiquetar_estado, axis=1)
         st.dataframe(resumen_diario, use_container_width=True)
     else:
         st.info("Aún no hay viajes registrados.")
