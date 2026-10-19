@@ -7,10 +7,9 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
-# --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Control de Viajes y Metas", page_icon="🚖", layout="wide")
 
-# --- CONEXIÓN A BASE DE DATOS ---
+# --- BASE DE DATOS ---
 def init_db():
     conn = sqlite3.connect("produccion_viajes.db")
     c = conn.cursor()
@@ -54,7 +53,7 @@ def procesar_capturas(imagenes):
         "id_servicio": "número de servicio o ID (string)",
         "anio": 2026,
         "mes": 10,
-        "dia": 8,
+        "dia": 18,
         "hora": 23,
         "minuto": 20,
         "monto_total": 0.0,
@@ -101,6 +100,7 @@ def procesar_capturas(imagenes):
     raise Exception(f"Error al procesar: {ultimo_error}")
 
 def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
+    # En turno nocturno, las horas de madrugada (antes del corte) pertenecen a la guardia del día anterior
     if tipo_turno == "Nocturno" and dt.hour < hora_corte:
         return (dt - timedelta(days=1)).date()
     return dt.date()
@@ -137,7 +137,7 @@ if "datos_autocompletados" not in st.session_state:
 # --- TAB 1: REGISTRAR VIAJE ---
 with tab1:
     st.subheader("Subir captura(s) del servicio")
-    st.caption("Puedes subir 1 sola captura (Kusi) o 2 capturas si la pantalla requirió scroll (Directo).")
+    st.caption("Sube 1 captura (Kusi) o 2 capturas continuas (Directo).")
 
     uploaded_files = st.file_uploader(
         "Selecciona 1 o 2 capturas", 
@@ -153,12 +153,12 @@ with tab1:
                 st.image(img, caption=f"Parte {idx+1}", use_column_width=True)
 
         if st.button("🔍 Extraer Datos con IA"):
-            with st.spinner("Analizando captura(s) con IA..."):
+            with st.spinner("Analizando con IA..."):
                 try:
                     datos = procesar_capturas(imgs)
 
                     try:
-                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 1)))
+                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 18)))
                         h_dt = time(int(datos.get("hora", 0)), int(datos.get("minuto", 0)))
                     except Exception:
                         f_dt = datetime.now().date()
@@ -178,11 +178,10 @@ with tab1:
                         "tipo_usuario": datos.get("tipo_usuario", "Corporativo"),
                         "tipo_asignacion": datos.get("tipo_asignacion", "Reserva")
                     }
-                    st.success("¡Datos extraídos con la fecha y hora original del servicio!")
+                    st.success("¡Datos extraídos con fecha y hora del servicio!")
                 except Exception as e:
                     st.error(f"Aviso de extracción: {e}")
 
-    # Formulario
     with st.form("form_registro"):
         d = st.session_state["datos_autocompletados"]
         st.write("Verifica los datos antes de guardar:")
@@ -207,7 +206,7 @@ with tab1:
         produccion_neta = tarifa_base + recargos
         monto_total = produccion_neta + reembolsos
 
-        st.info(f"**Producción Neta (Válida para Bono):** S/ {produccion_neta:.2f} | **Total con peajes:** S/ {monto_total:.2f}")
+        st.info(f"**Producción Neta:** S/ {produccion_neta:.2f} | **Total con peajes:** S/ {monto_total:.2f}")
 
         submitted = st.form_submit_button("💾 Guardar Viaje")
 
@@ -231,13 +230,13 @@ with tab1:
                         produccion_neta, monto_total
                     ))
                     conn.commit()
-                    st.success(f"Viaje N° {id_servicio} guardado para el turno operativo {f_op} (Semana {sem_op}).")
+                    st.success(f"Viaje N° {id_servicio} guardado para el turno {f_op} (Semana {sem_op}).")
                 except Exception as e:
                     st.error(f"Error al guardar: {e}")
                 finally:
                     conn.close()
 
-# --- TAB 2: PANEL SEMANAL & SEMÁFORO INTELIGENTE ---
+# --- TAB 2: PANEL SEMANAL & PROYECCIÓN ---
 with tab2:
     conn = sqlite3.connect("produccion_viajes.db")
     df = pd.read_sql_query("SELECT * FROM viajes", conn)
@@ -256,109 +255,100 @@ with tab2:
             km=('distancia_km', 'sum')
         ).reset_index()
 
-        # Determinar cuál es el día operativo actual en curso
-        ahora = datetime.now()
-        dia_op_hoy = calcular_fecha_operativa(ahora, tipo_turno, hora_corte).isoformat()
-
+        # Determinar el último día registrado de la semana seleccionada
+        ultimo_dia_registrado = resumen_diario["fecha_operativa"].max()
+        
         dias_trabajados = len(resumen_diario)
         produccion_total = df_sem["produccion_neta"].sum()
         viajes_totales = len(df_sem)
 
-        # Separar días cerrados del día actual en curso
-        dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != dia_op_hoy]
-        dia_en_curso = resumen_diario[resumen_diario["fecha_operativa"] == dia_op_hoy]
-
-        prod_hoy = dia_en_curso["produccion"].values[0] if not dia_en_curso.empty else 0.0
-        falta_piso_hoy = max(0.0, 300.0 - prod_hoy)
-
-        # Evaluar fallas de piso solo en días que ya cerraron
-        dias_fallan_piso_cerrados = dias_cerrados[dias_cerrados["produccion"] < 300.0]
-        tiene_fallas_cerradas = len(dias_fallan_piso_cerrados) > 0
-
-        # Umbrales según régimen
+        # Metas según régimen
         meta_b25 = regimen * 400.0
         meta_b55 = regimen * 421.0
         meta_b100 = regimen * 450.0
 
-        st.subheader("🎯 Estado de Metas y Bonos Semanales")
+        # --- SIMULADOR DE PREASIGNADOS ---
+        st.subheader("🔮 Planificador de Guardia (Preasignados)")
+        with st.expander("Calcular proyección con servicios preasignados", expanded=True):
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                preasig_1 = st.number_input("Monto Preasignado 1 (S/)", min_value=0.0, value=0.0, step=5.0)
+            with col_p2:
+                preasig_2 = st.number_input("Monto Preasignado 2 (S/)", min_value=0.0, value=0.0, step=5.0)
+            
+            suma_preasig = preasig_1 + preasig_2
+            
+            # Obtener producción de la guardia activa
+            prod_guardia_activa = resumen_diario[resumen_diario["fecha_operativa"] == ultimo_dia_registrado]["produccion"].values[0]
+            prod_guardia_proyectada = prod_guardia_activa + suma_preasig
+            prod_semana_proyectada = produccion_total + suma_preasig
 
-        # CASO 1: Ya hay un día cerrado anterior que no llegó a S/ 300
-        if tiene_fallas_cerradas:
-            st.error(
-                f"🔴 **SEMÁFORO ROJO: BONO ANULADO**\n\n"
-                f"El día {dias_fallan_piso_cerrados['fecha_operativa'].values[0]} cerró con menos de S/ 300.00. "
-                "Las reglas de la empresa anulan el bono semanal si algún día cerrado queda por debajo del piso."
-            )
+            falta_piso_guardia = max(0.0, 300.0 - prod_guardia_proyectada)
+            falta_b100_proy = max(0.0, meta_b100 - prod_semana_proyectada)
 
-        # CASO 2: Estás trabajando la guardia y aún no hay fallas cerradas
-        else:
-            # Estado del piso diario de hoy
-            if falta_piso_hoy > 0:
-                st.warning(
-                    f"⏳ **GUARDIA EN CURSO - PISO DIARIO:**\n\n"
-                    f"Hoy llevas **S/ {prod_hoy:.2f}**. Te faltan **S/ {falta_piso_hoy:.2f}** para cumplir el piso mínimo de S/ 300 de hoy y no perder la opción a bono."
-                )
+            if suma_preasig > 0:
+                st.info(f"💼 **Preasignados sumados:** S/ {suma_preasig:.2f} | **Producción proyectada de la guardia:** S/ {prod_guardia_proyectada:.2f}")
+                if falta_piso_guardia == 0:
+                    st.success("✅ ¡Piso diario de S/ 300 asegurado con tus preasignados!")
+                else:
+                    st.warning(f"⚠️ Aún te faltan **S/ {falta_piso_guardia:.2f}** en la calle para llegar al piso de S/ 300.")
+                
+                if falta_b100_proy == 0:
+                    st.success("🔥 ¡Con estos servicios completas la meta para el **Bono de S/ 100**!")
+                else:
+                    st.write(f"🎯 Faltan **S/ {falta_b100_proy:.2f}** antes de cerrar la guardia para alcanzar los S/ 100.")
+
+        st.divider()
+
+        # --- ESTADO DE BONOS ---
+        st.subheader("🎯 Estado Actual de Bonos Semanales")
+        
+        falta_b25 = max(0.0, meta_b25 - produccion_total)
+        falta_b55 = max(0.0, meta_b55 - produccion_total)
+        falta_b100 = max(0.0, meta_b100 - produccion_total)
+
+        col_b1, col_b2, col_b3 = st.columns(3)
+        with col_b1:
+            if falta_b25 == 0:
+                st.success("🎉 **Bono S/ 25:** ¡ALCANZADO!")
             else:
-                st.success(f"✅ **PISO DE HOY CUMPLIDO:** Llevas S/ {prod_hoy:.2f} hoy (Superaste los S/ 300).")
+                st.info(f"🥉 **Para Bono S/ 25:**\nFaltan **S/ {falta_b25:.2f}**")
 
-            # Cuánto falta para cada bono
-            falta_b25 = max(0.0, meta_b25 - produccion_total)
-            falta_b55 = max(0.0, meta_b55 - produccion_total)
-            falta_b100 = max(0.0, meta_b100 - produccion_total)
+        with col_b2:
+            if falta_b55 == 0:
+                st.success("🎉 **Bono S/ 55:** ¡ALCANZADO!")
+            else:
+                st.info(f"🥈 **Para Bono S/ 55:**\nFaltan **S/ {falta_b55:.2f}**")
 
-            col_b1, col_b2, col_b3 = st.columns(3)
-            with col_b1:
-                if falta_b25 == 0:
-                    st.success("🎉 **Bono S/ 25:** ¡ALCANZADO!")
-                else:
-                    st.info(f"🥉 **Para Bono S/ 25:**\nFaltan **S/ {falta_b25:.2f}**")
+        with col_b3:
+            if falta_b100 == 0:
+                st.success("🔥 **Bono S/ 100:** ¡ALCANZADO!")
+            else:
+                st.info(f"🥇 **Para Bono S/ 100:**\nFaltan **S/ {falta_b100:.2f}**")
 
-            with col_b2:
-                if falta_b55 == 0:
-                    st.success("🎉 **Bono S/ 55:** ¡ALCANZADO!")
-                else:
-                    st.info(f"🥈 **Para Bono S/ 55:**\nFaltan **S/ {falta_b55:.2f}**")
-
-            with col_b3:
-                if falta_b100 == 0:
-                    st.success("🔥 **Bono S/ 100:** ¡ALCANZADO!")
-                else:
-                    st.info(f"🥇 **Para Bono S/ 100:**\nFaltan **S/ {falta_b100:.2f}**")
-
-        # Barra de progreso visual hacia los S/ 100
+        # Barra de progreso
         progreso = min(1.0, produccion_total / meta_b100) if meta_b100 > 0 else 0.0
-        st.write(f"**Progreso total hacia Bono S/ 100 (Meta: S/ {meta_b100:.2f}):**")
+        st.write(f"**Progreso hacia Bono S/ 100 (Meta: S/ {meta_b100:.2f}):**")
         st.progress(progreso)
 
-        # Métricas principales
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.metric("Días Registrados", f"{dias_trabajados} / {regimen}")
+        col_m1.metric("Días Trabajados", f"{dias_trabajados} / {regimen}")
         col_m2.metric("N° Total de Viajes", viajes_totales)
-        col_m3.metric("Producción Acumulada", f"S/ {produccion_total:.2f}")
+        col_m3.metric("Producción Neta", f"S/ {produccion_total:.2f}")
 
-        bono_estimado = 0
-        if not tiene_fallas_cerradas and falta_piso_hoy == 0 and dias_trabajados >= regimen:
-            if produccion_total >= meta_b100:
-                bono_estimado = 100
-            elif produccion_total >= meta_b55:
-                bono_estimado = 55
-            elif produccion_total >= meta_b25:
-                bono_estimado = 25
-        col_m4.metric("Bono Proyectado", f"S/ {bono_estimado}.00")
+        bono_actual = 100 if produccion_total >= meta_b100 else (55 if produccion_total >= meta_b55 else (25 if produccion_total >= meta_b25 else 0))
+        col_m4.metric("Bono Alcanzado", f"S/ {bono_actual}.00")
 
         st.divider()
         st.subheader("📋 Detalle Diario de la Semana")
 
-        def etiquetar_estado(row):
-            if row["fecha_operativa"] == dia_op_hoy:
-                return f"⏳ En curso (Llevas S/ {row['produccion']:.2f})"
-            elif row["produccion"] >= 300.0:
-                return "✅ Cumplido (>= 300)"
-            else:
-                return "❌ Falló (< 300)"
-
-        resumen_diario["Estado"] = resumen_diario.apply(etiquetar_estado, axis=1)
-        st.dataframe(resumen_diario, use_container_width=True)
+        # Corregir índice para que empiece en Día 1
+        resumen_mostrar = resumen_diario.copy()
+        resumen_mostrar.index = [f"Día {i+1}" for i in range(len(resumen_mostrar))]
+        resumen_mostrar["Estado Piso"] = resumen_mostrar["produccion"].apply(
+            lambda x: "✅ Cumplido (>=300)" if x >= 300.0 else "❌ Falla (<300)"
+        )
+        st.dataframe(resumen_mostrar, use_container_width=True)
     else:
         st.info("Aún no hay viajes registrados.")
 
@@ -387,3 +377,4 @@ with tab3:
             st.rerun()
     else:
         st.info("No hay registros en la base de datos.")
+    
