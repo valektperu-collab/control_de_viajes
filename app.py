@@ -12,7 +12,6 @@ st.set_page_config(page_title="Control de Viajes", page_icon="🚖", layout="wid
 
 st.markdown("""
 <style>
-    /* Ajuste para que el encabezado no choque con la barra superior */
     .block-container { 
         padding-top: 3.8rem !important; 
         padding-bottom: 2rem !important; 
@@ -143,7 +142,6 @@ def procesar_capturas(imagenes):
     - metodo_pago: Empresa, Efectivo, Yape o Tarjeta.
     """
 
-    # Modelos actualizados vigentes
     modelos = ["gemini-3.8-flash", "gemini-2.5-flash"]
     ultimo_error = None
 
@@ -179,7 +177,6 @@ tipo_turno = st.sidebar.selectbox("Turno", ["Nocturno", "Diurno"])
 hora_corte = st.sidebar.number_input("Corte Salida", min_value=1, max_value=12, value=5 if tipo_turno == "Nocturno" else 0)
 regimen = st.sidebar.selectbox("Régimen", [5, 6], format_func=lambda x: f"{x}x{7-x}")
 
-# Pestaña "Guardia & Metas" colocada como primera opción
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Guardia & Metas", "📸 Registrar", "💰 Abonos", "📋 Historial"])
 
 if "datos_autocompletados" not in st.session_state:
@@ -201,7 +198,7 @@ for pre_id in ["pre1", "pre2", "pre3"]:
     if f"{pre_id}_estado" not in st.session_state:
         st.session_state[f"{pre_id}_estado"] = "Pendiente"
 
-# --- TAB 1: GUARDIA & METAS (HERO CARD PRINCIPAL) ---
+# --- TAB 1: GUARDIA & METAS ---
 with tab1:
     conn = sqlite3.connect("produccion_viajes.db")
     df = pd.read_sql_query("SELECT * FROM viajes", conn)
@@ -225,7 +222,6 @@ with tab1:
         meta_semanal_100 = regimen * 450.0
         falta_semanal_total = max(0.0, meta_semanal_100 - prod_acumulada)
         
-        # Preasignados activos
         preasig_activos = sum([
             st.session_state[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
             if st.session_state[f"{p}_estado"] == "Pendiente"
@@ -235,7 +231,6 @@ with tab1:
         falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
         piso_badge = "✅ PISO OK" if falta_piso_hoy == 0 else f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
 
-        # Cálculo de meta ajustada por días
         dias_futuros = max(1, regimen - dias_trabajados)
         meta_promedio_proximos_dias = (falta_semanal_total / dias_futuros) if dias_futuros > 0 else 0.0
 
@@ -245,7 +240,6 @@ with tab1:
 
         pct_semana = min(100.0, (prod_acumulada / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
 
-        # Alerta motivacional según hora y ritmo
         ahora_hora = datetime.now().hour
         if falta_piso_hoy > 0:
             alerta_msg = f"⚠️ Faltan S/ {falta_piso_hoy:.2f} para asegurar el piso mínimo de S/ 300 de hoy y mantener el bono activo."
@@ -262,7 +256,6 @@ with tab1:
             else:
                 alerta_msg = f"💡 Te faltan S/ {falta_hoy:.2f} (aprox {carreras_aprox} carreras) para cerrar tu meta de S/ 450 de hoy. Tienes buen flujo antes de la 1:00 AM."
 
-        # Renderizado de Hero Card
         st.markdown(f"""
         <div class="hero-card">
             <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {piso_badge}</div>
@@ -449,4 +442,53 @@ with tab3:
 # --- TAB 4: HISTORIAL CON FILTRO SEMANAL ---
 with tab4:
     st.markdown("#### 📋 Historial de Servicios")
-    conn = s
+    conn = sqlite3.connect("produccion_viajes.db")
+    df_all = pd.read_sql_query("""
+        SELECT 
+            id_servicio,
+            semana_operativa,
+            fecha_operativa,
+            tipo_asignacion,
+            metodo_pago,
+            produccion_neta,
+            monto_reembolsos,
+            monto_total
+        FROM viajes 
+        ORDER BY fecha_hora_viaje DESC
+    """, conn)
+    conn.close()
+
+    if not df_all.empty:
+        semanas_lista = sorted(df_all["semana_operativa"].unique().tolist(), reverse=True)
+        semana_actual = semanas_lista[0]
+        
+        opciones_filtro = [f"Esta semana ({semana_actual})"]
+        if len(semanas_lista) > 1:
+            opciones_filtro.append(f"Semana anterior ({semanas_lista[1]})")
+        opciones_filtro.append("Ver todos los servicios")
+
+        filtro_sel = st.selectbox("Filtrar por:", opciones_filtro, index=0)
+
+        if "Esta semana" in filtro_sel:
+            df_mostrar = df_all[df_all["semana_operativa"] == semana_actual]
+        elif "Semana anterior" in filtro_sel:
+            df_mostrar = df_all[df_all["semana_operativa"] == semanas_lista[1]]
+        else:
+            df_mostrar = df_all
+
+        st.caption(f"Mostrando {len(df_mostrar)} viajes.")
+        st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+
+        st.divider()
+        lista_ids = df_mostrar["id_servicio"].tolist()
+        id_borrar = st.selectbox("Eliminar servicio:", lista_ids)
+        if st.button("❌ Confirmar Eliminación"):
+            conn = sqlite3.connect("produccion_viajes.db")
+            c = conn.cursor()
+            c.execute("DELETE FROM viajes WHERE id_servicio = ?", (id_borrar,))
+            conn.commit()
+            conn.close()
+            st.success("Eliminado.")
+            st.rerun()
+    else:
+        st.info("Sin viajes registrados.")
