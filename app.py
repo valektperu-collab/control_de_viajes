@@ -12,18 +12,18 @@ st.set_page_config(page_title="Control de Viajes", page_icon="🚖", layout="wid
 
 st.markdown("""
 <style>
-    /* Margen superior para que el título no quede tapado por la barra de navegación */
+    /* Ajuste para que el encabezado no choque con la barra superior */
     .block-container { 
-        padding-top: 3.2rem !important; 
+        padding-top: 3.8rem !important; 
         padding-bottom: 2rem !important; 
         padding-left: 0.8rem !important; 
         padding-right: 0.8rem !important; 
     }
     .titulo-app {
-        font-size: 1.25rem !important;
+        font-size: 1.22rem !important;
         font-weight: 800 !important;
-        color: #1f2937;
-        margin-bottom: 0.4rem !important;
+        color: #111827;
+        margin-bottom: 0.5rem !important;
     }
     
     .hero-card {
@@ -93,7 +93,7 @@ def init_db():
 
 init_db()
 
-# --- OPTIMIZACIÓN RÁPIDA DE IMAGEN ---
+# --- OPTIMIZACIÓN RÁPIDA DE IMÁGENES ---
 def optimizar_imagen(img_pil):
     w, h = img_pil.size
     if w > 800:
@@ -124,7 +124,7 @@ def procesar_capturas(imagenes):
         "id_servicio": "ID o número",
         "anio": 2026,
         "mes": 10,
-        "dia": 19,
+        "dia": 20,
         "hora": 23,
         "minuto": 20,
         "monto_total": 0.0,
@@ -170,7 +170,7 @@ def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
 def obtener_semana_operativa(fecha_op):
     return f"{fecha_op.isocalendar()[0]}-W{fecha_op.isocalendar()[1]:02d}"
 
-# --- TÍTULO PRINCIPAL VISIBLE ---
+# --- ENCABEZADO ---
 st.markdown('<div class="titulo-app">🚖 Copiloto de Metas y Guardia</div>', unsafe_allow_html=True)
 
 st.sidebar.header("⚙️ Ajustes")
@@ -178,7 +178,8 @@ tipo_turno = st.sidebar.selectbox("Turno", ["Nocturno", "Diurno"])
 hora_corte = st.sidebar.number_input("Corte Salida", min_value=1, max_value=12, value=5 if tipo_turno == "Nocturno" else 0)
 regimen = st.sidebar.selectbox("Régimen", [5, 6], format_func=lambda x: f"{x}x{7-x}")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📸 Registrar", "📊 Guardia & Metas", "💰 Abonos", "📋 Historial"])
+# Pestaña "Guardia & Metas" colocada como primera opción
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Guardia & Metas", "📸 Registrar", "💰 Abonos", "📋 Historial"])
 
 if "datos_autocompletados" not in st.session_state:
     st.session_state["datos_autocompletados"] = {
@@ -199,8 +200,113 @@ for pre_id in ["pre1", "pre2", "pre3"]:
     if f"{pre_id}_estado" not in st.session_state:
         st.session_state[f"{pre_id}_estado"] = "Pendiente"
 
-# --- TAB 1: REGISTRAR VIAJE ---
+# --- TAB 1: GUARDIA & METAS (HERO CARD PRINCIPAL) ---
 with tab1:
+    conn = sqlite3.connect("produccion_viajes.db")
+    df = pd.read_sql_query("SELECT * FROM viajes", conn)
+    conn.close()
+
+    if not df.empty:
+        semanas_disp = sorted(df["semana_operativa"].unique(), reverse=True)
+        semana_sel = st.selectbox("Semana Operativa", semanas_disp)
+        df_sem = df[df["semana_operativa"] == semana_sel]
+
+        resumen_diario = df_sem.groupby("fecha_operativa").agg(
+            viajes=('id_servicio', 'count'),
+            produccion=('produccion_neta', 'sum')
+        ).reset_index()
+
+        ultimo_dia = resumen_diario["fecha_operativa"].max()
+        prod_hoy = resumen_diario[resumen_diario["fecha_operativa"] == ultimo_dia]["produccion"].values[0]
+        prod_acumulada = df_sem["produccion_neta"].sum()
+        dias_trabajados = len(resumen_diario)
+        
+        meta_semanal_100 = regimen * 450.0
+        falta_semanal_total = max(0.0, meta_semanal_100 - prod_acumulada)
+        
+        # Preasignados activos
+        preasig_activos = sum([
+            st.session_state[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
+            if st.session_state[f"{p}_estado"] == "Pendiente"
+        ])
+        total_guardia_proy = prod_hoy + preasig_activos
+
+        falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
+        piso_badge = "✅ PISO OK" if falta_piso_hoy == 0 else f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
+
+        # Cálculo de meta ajustada por días
+        dias_futuros = max(1, regimen - dias_trabajados)
+        meta_promedio_proximos_dias = (falta_semanal_total / dias_futuros) if dias_futuros > 0 else 0.0
+
+        meta_hoy_base = 450.0
+        superavit_hoy = max(0.0, total_guardia_proy - meta_hoy_base)
+        falta_hoy = max(0.0, meta_hoy_base - total_guardia_proy)
+
+        pct_semana = min(100.0, (prod_acumulada / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
+
+        # Alerta motivacional según hora y ritmo
+        ahora_hora = datetime.now().hour
+        if falta_piso_hoy > 0:
+            alerta_msg = f"⚠️ Faltan S/ {falta_piso_hoy:.2f} para asegurar el piso mínimo de S/ 300 de hoy y mantener el bono activo."
+        elif total_guardia_proy >= meta_hoy_base:
+            alerta_msg = (
+                f"🔥 **¡Cuota de hoy cumplida (+S/ {superavit_hoy:.2f})!** "
+                f"Con este superávit, la meta para tus siguientes {dias_futuros} día(s) baja a solo **S/ {meta_promedio_proximos_dias:.2f} por día**. "
+                "Si ya pasó la medianoche, evalúa descansar."
+            )
+        else:
+            carreras_aprox = int((falta_hoy // 65) + (1 if falta_hoy % 65 > 0 else 0))
+            if ahora_hora >= 1 and ahora_hora < 5:
+                alerta_msg = f"🌙 Pasó la 1:00 AM. Flujo bajo en aeropuerto. Te faltan S/ {falta_hoy:.2f} ({carreras_aprox} carreras) para los S/ 450. Evalúa si hay vuelos o guardamos."
+            else:
+                alerta_msg = f"💡 Te faltan S/ {falta_hoy:.2f} (aprox {carreras_aprox} carreras) para cerrar tu meta de S/ 450 de hoy. Tienes buen flujo antes de la 1:00 AM."
+
+        # Renderizado de Hero Card
+        st.markdown(f"""
+        <div class="hero-card">
+            <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {piso_badge}</div>
+            <div class="hero-meta">S/ {prod_acumulada:.2f} <span style="font-size:0.85rem; color:#9ca3af;">de S/ {meta_semanal_100:.0f} (Bono 100)</span></div>
+            <div class="hero-sub">Pendiente general: <strong>S/ {falta_semanal_total:.2f}</strong> ({pct_semana:.1f}%)</div>
+            <hr style="margin: 6px 0; border-color: #374151;">
+            <div style="font-size:0.88rem; margin-top:4px;">
+                <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig:</strong> S/ {preasig_activos:.2f}<br>
+                <strong>Meta Base Día:</strong> S/ 450.00 &nbsp;|&nbsp; 
+                {"<strong style='color:#34d399;'>¡Superada por S/ " + f"{superavit_hoy:.2f}!" + "</strong>" if total_guardia_proy >= meta_hoy_base else "<span style='color:#f87171; font-weight:700;'>Faltan S/ " + f"{falta_hoy:.2f}" + "</span>"}
+            </div>
+            <div class="hero-alert">{alerta_msg}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("💼 Preasignados de la Guardia (Pre 1, 2, 3)", expanded=False):
+            for pid, label in [("pre1", "Pre 1"), ("pre2", "Pre 2"), ("pre3", "Pre 3")]:
+                col_a, col_b, col_c = st.columns([2, 1.5, 1.5])
+                with col_a:
+                    st.session_state[f"{pid}_monto"] = st.number_input(f"{label} (S/)", min_value=0.0, value=st.session_state[f"{pid}_monto"], step=5.0, key=f"inp_{pid}")
+                with col_b:
+                    st.caption(f"Estado: {st.session_state[f'{pid}_estado']}")
+                with col_c:
+                    if st.session_state[f"{pid}_estado"] == "Pendiente":
+                        if st.button("✅ Hecho", key=f"ok_{pid}"):
+                            st.session_state[f"{pid}_estado"] = "Hecho"
+                            st.rerun()
+                        if st.button("❌ Caído", key=f"no_{pid}"):
+                            st.session_state[f"{pid}_estado"] = "Caído"
+                            st.rerun()
+                    else:
+                        if st.button("Reactivar", key=f"rst_{pid}"):
+                            st.session_state[f"{pid}_estado"] = "Pendiente"
+                            st.rerun()
+
+        st.markdown("#### 📋 Detalle de la Semana")
+        resumen_mostrar = resumen_diario.copy()
+        resumen_mostrar.index = [f"Día {i+1}" for i in range(len(resumen_mostrar))]
+        resumen_mostrar["Piso S/ 300"] = resumen_mostrar["produccion"].apply(lambda x: "✅ OK" if x >= 300.0 else "❌ Falla")
+        st.dataframe(resumen_mostrar, use_container_width=True)
+    else:
+        st.info("Sin registros aún. Ve a la pestaña '📸 Registrar' para cargar tu primer viaje.")
+
+# --- TAB 2: REGISTRAR VIAJE ---
+with tab2:
     uploaded_files = st.file_uploader("Captura(s) del viaje", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
     if uploaded_files:
@@ -210,7 +316,7 @@ with tab1:
                 try:
                     datos = procesar_capturas(imgs)
                     try:
-                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 19)))
+                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 20)))
                         h_dt = time(int(datos.get("hora", 0)), int(datos.get("minuto", 0)))
                     except Exception:
                         f_dt = datetime.now().date()
@@ -290,116 +396,6 @@ with tab1:
                 finally:
                     conn.close()
 
-# --- TAB 2: HERO CARD TÁCTICA Y METAS ---
-with tab2:
-    conn = sqlite3.connect("produccion_viajes.db")
-    df = pd.read_sql_query("SELECT * FROM viajes", conn)
-    conn.close()
-
-    if not df.empty:
-        semanas_disp = sorted(df["semana_operativa"].unique(), reverse=True)
-        semana_sel = st.selectbox("Semana Operativa", semanas_disp)
-        df_sem = df[df["semana_operativa"] == semana_sel]
-
-        resumen_diario = df_sem.groupby("fecha_operativa").agg(
-            viajes=('id_servicio', 'count'),
-            produccion=('produccion_neta', 'sum')
-        ).reset_index()
-
-        ultimo_dia = resumen_diario["fecha_operativa"].max()
-        prod_hoy = resumen_diario[resumen_diario["fecha_operativa"] == ultimo_dia]["produccion"].values[0]
-        prod_acumulada = df_sem["produccion_neta"].sum()
-        dias_trabajados = len(resumen_diario)
-        
-        # Meta general Bono 100
-        meta_semanal_100 = regimen * 450.0
-        falta_semanal_total = max(0.0, meta_semanal_100 - prod_acumulada)
-        
-        # Preasignados activos
-        preasig_activos = sum([
-            st.session_state[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
-            if st.session_state[f"{p}_estado"] == "Pendiente"
-        ])
-        total_guardia_proy = prod_hoy + preasig_activos
-
-        # Verificación piso de S/ 300
-        falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
-        piso_badge = "✅ PISO OK" if falta_piso_hoy == 0 else f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
-
-        # --- LÓGICA MATEMÁTICA CORREGIDA ---
-        # La meta diaria estándar es 450
-        meta_hoy_base = 450.0
-        superavit_hoy = max(0.0, total_guardia_proy - meta_hoy_base)
-        falta_hoy = max(0.0, meta_hoy_base - total_guardia_proy)
-        
-        # Días restantes de la semana (sin contar el de hoy si ya está hecho)
-        dias_futuros = max(1, regimen - dias_trabajados)
-        meta_promedio_proximos_dias = (falta_semanal_total / dias_futuros) if dias_futuros > 0 else 0.0
-
-        pct_semana = min(100.0, (prod_acumulada / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
-
-        # Alerta inteligente motivacional
-        ahora_hora = datetime.now().hour
-        if falta_piso_hoy > 0:
-            alerta_msg = f"⚠️ Faltan S/ {falta_piso_hoy:.2f} para asegurar el piso mínimo de S/ 300 de hoy y mantener el bono activo."
-        elif total_guardia_proy >= meta_hoy_base:
-            alerta_msg = (
-                f"🔥 **¡Cuota de hoy cumplida (+S/ {superavit_hoy:.2f})!** "
-                f"Con este superávit, la meta para tus siguientes {dias_futuros} día(s) baja a solo **S/ {meta_promedio_proximos_dias:.2f} por día**. "
-                "Si ya pasó la medianoche, evalúa descansar."
-            )
-        else:
-            carreras_aprox = int((falta_hoy // 65) + (1 if falta_hoy % 65 > 0 else 0))
-            if ahora_hora >= 1 and ahora_hora < 5:
-                alerta_msg = f"🌙 Pasó la 1:00 AM. Flujo bajo en aeropuerto. Te faltan S/ {falta_hoy:.2f} ({carreras_aprox} carreras) para los S/ 450. Evalúa si hay vuelos o guardamos."
-            else:
-                alerta_msg = f"💡 Te faltan S/ {falta_hoy:.2f} (aprox {carreras_aprox} carreras) para cerrar tu meta de S/ 450 de hoy. Tienes buen flujo antes de la 1:00 AM."
-
-        # Hero Card Táctica Compacta
-        st.markdown(f"""
-        <div class="hero-card">
-            <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {piso_badge}</div>
-            <div class="hero-meta">S/ {prod_acumulada:.2f} <span style="font-size:0.85rem; color:#9ca3af;">de S/ {meta_semanal_100:.0f} (Bono 100)</span></div>
-            <div class="hero-sub">Pendiente general: <strong>S/ {falta_semanal_total:.2f}</strong> ({pct_semana:.1f}%)</div>
-            <hr style="margin: 6px 0; border-color: #374151;">
-            <div style="font-size:0.88rem; margin-top:4px;">
-                <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig:</strong> S/ {preasig_activos:.2f}<br>
-                <strong>Meta Base Día:</strong> S/ 450.00 &nbsp;|&nbsp; 
-                {"<strong style='color:#34d399;'>¡Superada por S/ " + f"{superavit_hoy:.2f}!" + "</strong>" if total_guardia_proy >= meta_hoy_base else "<span style='color:#f87171; font-weight:700;'>Faltan S/ " + f"{falta_hoy:.2f}" + "</span>"}
-            </div>
-            <div class="hero-alert">{alerta_msg}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Preasignados
-        with st.expander("💼 Preasignados de la Guardia (Pre 1, 2, 3)", expanded=False):
-            for pid, label in [("pre1", "Pre 1"), ("pre2", "Pre 2"), ("pre3", "Pre 3")]:
-                col_a, col_b, col_c = st.columns([2, 1.5, 1.5])
-                with col_a:
-                    st.session_state[f"{pid}_monto"] = st.number_input(f"{label} (S/)", min_value=0.0, value=st.session_state[f"{pid}_monto"], step=5.0, key=f"inp_{pid}")
-                with col_b:
-                    st.caption(f"Estado: {st.session_state[f'{pid}_estado']}")
-                with col_c:
-                    if st.session_state[f"{pid}_estado"] == "Pendiente":
-                        if st.button("✅ Hecho", key=f"ok_{pid}"):
-                            st.session_state[f"{pid}_estado"] = "Hecho"
-                            st.rerun()
-                        if st.button("❌ Caído", key=f"no_{pid}"):
-                            st.session_state[f"{pid}_estado"] = "Caído"
-                            st.rerun()
-                    else:
-                        if st.button("Reactivar", key=f"rst_{pid}"):
-                            st.session_state[f"{pid}_estado"] = "Pendiente"
-                            st.rerun()
-
-        st.markdown("#### 📋 Detalle de la Semana")
-        resumen_mostrar = resumen_diario.copy()
-        resumen_mostrar.index = [f"Día {i+1}" for i in range(len(resumen_mostrar))]
-        resumen_mostrar["Piso S/ 300"] = resumen_mostrar["produccion"].apply(lambda x: "✅ OK" if x >= 300.0 else "❌ Falla")
-        st.dataframe(resumen_mostrar, use_container_width=True)
-    else:
-        st.info("Sin registros aún.")
-
 # --- TAB 3: RENDICIÓN EFECTIVO / YAPE ---
 with tab3:
     st.markdown("#### 💰 Rendición Efectivo / Yape")
@@ -469,11 +465,9 @@ with tab4:
     conn.close()
 
     if not df_all.empty:
-        # Semanas únicas ordenadas (la más reciente primero)
         semanas_lista = sorted(df_all["semana_operativa"].unique().tolist(), reverse=True)
         semana_actual = semanas_lista[0]
         
-        # Opciones de filtro
         opciones_filtro = [f"Esta semana ({semana_actual})"]
         if len(semanas_lista) > 1:
             opciones_filtro.append(f"Semana anterior ({semanas_lista[1]})")
