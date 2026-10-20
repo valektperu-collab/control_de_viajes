@@ -12,10 +12,19 @@ st.set_page_config(page_title="Control de Viajes", page_icon="🚖", layout="wid
 
 st.markdown("""
 <style>
-    .block-container { padding-top: 0.8rem; padding-bottom: 2rem; padding-left: 0.8rem; padding-right: 0.8rem; }
-    h1 { font-size: 1.25rem !important; margin-bottom: 0.3rem !important; }
-    h2, h3 { font-size: 1.05rem !important; margin-top: 0.4rem !important; margin-bottom: 0.2rem !important; }
-    p, span, label { font-size: 0.85rem !important; }
+    /* Margen superior para que el título no quede tapado por la barra de navegación */
+    .block-container { 
+        padding-top: 3.2rem !important; 
+        padding-bottom: 2rem !important; 
+        padding-left: 0.8rem !important; 
+        padding-right: 0.8rem !important; 
+    }
+    .titulo-app {
+        font-size: 1.25rem !important;
+        font-weight: 800 !important;
+        color: #1f2937;
+        margin-bottom: 0.4rem !important;
+    }
     
     .hero-card {
         background: #111827;
@@ -26,15 +35,16 @@ st.markdown("""
         border: 1px solid #374151;
     }
     .hero-title { font-size: 0.95rem; font-weight: 700; color: #fbbf24; margin-bottom: 6px; }
-    .hero-meta { font-size: 1.05rem; font-weight: 700; color: #ffffff; }
+    .hero-meta { font-size: 1.1rem; font-weight: 700; color: #ffffff; }
     .hero-sub { font-size: 0.85rem; color: #9ca3af; margin-bottom: 6px; }
     .hero-alert {
         background: #1f2937;
         border-left: 3px solid #3b82f6;
-        padding: 6px 10px;
+        padding: 8px 10px;
         border-radius: 4px;
-        font-size: 0.82rem;
+        font-size: 0.84rem;
         margin-top: 8px;
+        line-height: 1.35;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -83,16 +93,14 @@ def init_db():
 
 init_db()
 
-# --- OPTIMIZACIÓN Y COMPRESIÓN DE IMÁGENES ---
+# --- OPTIMIZACIÓN RÁPIDA DE IMAGEN ---
 def optimizar_imagen(img_pil):
-    # Redimensionar si es muy ancha para celular (máximo 800px de ancho)
     w, h = img_pil.size
     if w > 800:
         ratio = 800 / float(w)
         nuevo_h = int(float(h) * ratio)
         img_pil = img_pil.resize((800, nuevo_h), Image.Resampling.LANCZOS)
     
-    # Comprimir a JPEG ligero en memoria
     buffer = io.BytesIO()
     if img_pil.mode in ("RGBA", "P"):
         img_pil = img_pil.convert("RGB")
@@ -100,15 +108,13 @@ def optimizar_imagen(img_pil):
     buffer.seek(0)
     return Image.open(buffer)
 
-# --- PROCESAMIENTO CON IA RÁPIDO ---
+# --- PROCESAMIENTO CON IA ---
 def procesar_capturas(imagenes):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         raise Exception("Falta configurar GEMINI_API_KEY en Secrets.")
 
     client = genai.Client(api_key=api_key)
-
-    # Comprimir cada imagen antes de mandarla
     imagenes_ligeras = [optimizar_imagen(im) for im in imagenes]
 
     prompt = """
@@ -118,7 +124,7 @@ def procesar_capturas(imagenes):
         "id_servicio": "ID o número",
         "anio": 2026,
         "mes": 10,
-        "dia": 18,
+        "dia": 19,
         "hora": 23,
         "minuto": 20,
         "monto_total": 0.0,
@@ -130,14 +136,13 @@ def procesar_capturas(imagenes):
         "metodo_pago": "Empresa, Efectivo, Yape o Tarjeta"
     }
     REGLAS:
-    - Extrae FECHA y HORA reales del servicio.
+    - Extrae FECHA y HORA reales del servicio de la cabecera. Si no figura el año, usa 2026.
     - monto_recargos: suma extras/espera/recargos.
     - monto_reembolsos: peajes y estacionamientos.
     - tipo_asignacion: solo Directo, Kusi o Latam.
     - metodo_pago: Empresa, Efectivo, Yape o Tarjeta.
     """
 
-    # Modelos directos rápidos
     modelos = ["gemini-2.5-flash", "gemini-2.0-flash"]
     ultimo_error = None
 
@@ -165,8 +170,8 @@ def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
 def obtener_semana_operativa(fecha_op):
     return f"{fecha_op.isocalendar()[0]}-W{fecha_op.isocalendar()[1]:02d}"
 
-# --- CABECERA Y AJUSTES ---
-st.markdown("### 🚖 Copiloto de Metas")
+# --- TÍTULO PRINCIPAL VISIBLE ---
+st.markdown('<div class="titulo-app">🚖 Copiloto de Metas y Guardia</div>', unsafe_allow_html=True)
 
 st.sidebar.header("⚙️ Ajustes")
 tipo_turno = st.sidebar.selectbox("Turno", ["Nocturno", "Diurno"])
@@ -175,7 +180,6 @@ regimen = st.sidebar.selectbox("Régimen", [5, 6], format_func=lambda x: f"{x}x{
 
 tab1, tab2, tab3, tab4 = st.tabs(["📸 Registrar", "📊 Guardia & Metas", "💰 Abonos", "📋 Historial"])
 
-# Inicializar sesión
 if "datos_autocompletados" not in st.session_state:
     st.session_state["datos_autocompletados"] = {
         "id_servicio": "",
@@ -206,7 +210,7 @@ with tab1:
                 try:
                     datos = procesar_capturas(imgs)
                     try:
-                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 18)))
+                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 19)))
                         h_dt = time(int(datos.get("hora", 0)), int(datos.get("minuto", 0)))
                     except Exception:
                         f_dt = datetime.now().date()
@@ -229,7 +233,7 @@ with tab1:
                         "tipo_asignacion": tipo_asig_final,
                         "metodo_pago": pago_final
                     }
-                    st.success("¡Datos listos en segundos!")
+                    st.success("¡Datos listos!")
                 except Exception as e:
                     st.error(f"Aviso: {e}")
 
@@ -286,7 +290,7 @@ with tab1:
                 finally:
                     conn.close()
 
-# --- TAB 2: PANEL HERO CARD TÁCTICO ---
+# --- TAB 2: HERO CARD TÁCTICA Y METAS ---
 with tab2:
     conn = sqlite3.connect("produccion_viajes.db")
     df = pd.read_sql_query("SELECT * FROM viajes", conn)
@@ -306,55 +310,68 @@ with tab2:
         prod_hoy = resumen_diario[resumen_diario["fecha_operativa"] == ultimo_dia]["produccion"].values[0]
         prod_acumulada = df_sem["produccion_neta"].sum()
         dias_trabajados = len(resumen_diario)
-        dias_restantes = max(1, regimen - dias_trabajados + 1)
-
+        
+        # Meta general Bono 100
         meta_semanal_100 = regimen * 450.0
         falta_semanal_total = max(0.0, meta_semanal_100 - prod_acumulada)
-        meta_hoy_ajustada = (falta_semanal_total / dias_restantes) + prod_hoy
-
-        # Sumar solo preasignados que sigan en estado "Pendiente"
+        
+        # Preasignados activos
         preasig_activos = sum([
             st.session_state[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
             if st.session_state[f"{p}_estado"] == "Pendiente"
         ])
-
         total_guardia_proy = prod_hoy + preasig_activos
+
+        # Verificación piso de S/ 300
         falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
-        falta_hoy_meta = max(0.0, meta_hoy_ajustada - total_guardia_proy)
+        piso_badge = "✅ PISO OK" if falta_piso_hoy == 0 else f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
 
-        # Estimación de carreras (ticket promedio S/ 65)
-        carreras_faltan = int((falta_hoy_meta // 65) + (1 if falta_hoy_meta % 65 > 0 else 0))
+        # --- LÓGICA MATEMÁTICA CORREGIDA ---
+        # La meta diaria estándar es 450
+        meta_hoy_base = 450.0
+        superavit_hoy = max(0.0, total_guardia_proy - meta_hoy_base)
+        falta_hoy = max(0.0, meta_hoy_base - total_guardia_proy)
+        
+        # Días restantes de la semana (sin contar el de hoy si ya está hecho)
+        dias_futuros = max(1, regimen - dias_trabajados)
+        meta_promedio_proximos_dias = (falta_semanal_total / dias_futuros) if dias_futuros > 0 else 0.0
 
-        # Hora y alerta inteligente
-        ahora_hora = datetime.now().hour
-        if falta_piso_hoy > 0:
-            alerta_msg = f"⚠️ Faltan S/ {falta_piso_hoy:.2f} para salvar el piso de S/ 300 de hoy y mantener el bono activo."
-        elif falta_hoy_meta == 0:
-            alerta_msg = "🔥 ¡Meta diaria cumplida! Evalúa guardar el auto para descansar; no te desgastes en la madrugada."
-        elif ahora_hora >= 1 and ahora_hora < 5:
-            alerta_msg = f"🌙 Pasó la 1:00 AM. Flujo bajo en aeropuerto. Te faltan S/ {falta_hoy_meta:.2f}; evalúa si hay vuelos o guardamos."
-        else:
-            alerta_msg = f"💡 Te faltan S/ {falta_hoy_meta:.2f} (unas {carreras_faltan} carreras). Tienes buen flujo antes de la 1:00 AM."
-
-        # --- HERO CARD TÁCTICA ---
-        piso_badge = "✅ PISO OK" if falta_piso_hoy == 0 else f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.0f})"
         pct_semana = min(100.0, (prod_acumulada / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
 
+        # Alerta inteligente motivacional
+        ahora_hora = datetime.now().hour
+        if falta_piso_hoy > 0:
+            alerta_msg = f"⚠️ Faltan S/ {falta_piso_hoy:.2f} para asegurar el piso mínimo de S/ 300 de hoy y mantener el bono activo."
+        elif total_guardia_proy >= meta_hoy_base:
+            alerta_msg = (
+                f"🔥 **¡Cuota de hoy cumplida (+S/ {superavit_hoy:.2f})!** "
+                f"Con este superávit, la meta para tus siguientes {dias_futuros} día(s) baja a solo **S/ {meta_promedio_proximos_dias:.2f} por día**. "
+                "Si ya pasó la medianoche, evalúa descansar."
+            )
+        else:
+            carreras_aprox = int((falta_hoy // 65) + (1 if falta_hoy % 65 > 0 else 0))
+            if ahora_hora >= 1 and ahora_hora < 5:
+                alerta_msg = f"🌙 Pasó la 1:00 AM. Flujo bajo en aeropuerto. Te faltan S/ {falta_hoy:.2f} ({carreras_aprox} carreras) para los S/ 450. Evalúa si hay vuelos o guardamos."
+            else:
+                alerta_msg = f"💡 Te faltan S/ {falta_hoy:.2f} (aprox {carreras_aprox} carreras) para cerrar tu meta de S/ 450 de hoy. Tienes buen flujo antes de la 1:00 AM."
+
+        # Hero Card Táctica Compacta
         st.markdown(f"""
         <div class="hero-card">
             <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {piso_badge}</div>
             <div class="hero-meta">S/ {prod_acumulada:.2f} <span style="font-size:0.85rem; color:#9ca3af;">de S/ {meta_semanal_100:.0f} (Bono 100)</span></div>
-            <div class="hero-sub">Pendiente semana: <strong>S/ {falta_semanal_total:.2f}</strong> ({pct_semana:.1f}%)</div>
+            <div class="hero-sub">Pendiente general: <strong>S/ {falta_semanal_total:.2f}</strong> ({pct_semana:.1f}%)</div>
             <hr style="margin: 6px 0; border-color: #374151;">
             <div style="font-size:0.88rem; margin-top:4px;">
                 <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig:</strong> S/ {preasig_activos:.2f}<br>
-                <strong>Meta de Hoy:</strong> S/ {meta_hoy_ajustada:.2f} &nbsp;|&nbsp; <strong>Faltan:</strong> <span style="color:#f87171; font-weight:700;">S/ {falta_hoy_meta:.2f}</span>
+                <strong>Meta Base Día:</strong> S/ 450.00 &nbsp;|&nbsp; 
+                {"<strong style='color:#34d399;'>¡Superada por S/ " + f"{superavit_hoy:.2f}!" + "</strong>" if total_guardia_proy >= meta_hoy_base else "<span style='color:#f87171; font-weight:700;'>Faltan S/ " + f"{falta_hoy:.2f}" + "</span>"}
             </div>
             <div class="hero-alert">{alerta_msg}</div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Control de Preasignados Ultracompacto
+        # Preasignados
         with st.expander("💼 Preasignados de la Guardia (Pre 1, 2, 3)", expanded=False):
             for pid, label in [("pre1", "Pre 1"), ("pre2", "Pre 2"), ("pre3", "Pre 3")]:
                 col_a, col_b, col_c = st.columns([2, 1.5, 1.5])
@@ -407,9 +424,10 @@ with tab3:
 
             c1, c2 = st.columns([3, 2])
             with c1:
-                st.markdown(f"`{formato_envio}` | **S/ {row['monto_total']:.2f}** ({row['metodo_pago']})")
+                st.code(formato_envio, language=None)
+                st.caption(f"**S/ {row['monto_total']:.2f}** ({row['metodo_pago']})")
                 if esta_enviado:
-                    st.caption(f"Enviado: {row['fecha_hora_abono']}")
+                    st.success(f"Enviado: {row['fecha_hora_abono']}")
             with c2:
                 if not esta_enviado:
                     if st.button("Marcar Enviado", key=f"env_{id_serv}"):
@@ -431,13 +449,14 @@ with tab3:
     else:
         st.info("No hay viajes en Efectivo o Yape.")
 
-# --- TAB 4: HISTORIAL ---
+# --- TAB 4: HISTORIAL CON FILTRO SEMANAL ---
 with tab4:
-    st.markdown("#### 📋 Todos los Registros")
+    st.markdown("#### 📋 Historial de Servicios")
     conn = sqlite3.connect("produccion_viajes.db")
     df_all = pd.read_sql_query("""
         SELECT 
             id_servicio,
+            semana_operativa,
             fecha_operativa,
             tipo_asignacion,
             metodo_pago,
@@ -450,9 +469,30 @@ with tab4:
     conn.close()
 
     if not df_all.empty:
-        st.dataframe(df_all, use_container_width=True, hide_index=True)
+        # Semanas únicas ordenadas (la más reciente primero)
+        semanas_lista = sorted(df_all["semana_operativa"].unique().tolist(), reverse=True)
+        semana_actual = semanas_lista[0]
+        
+        # Opciones de filtro
+        opciones_filtro = [f"Esta semana ({semana_actual})"]
+        if len(semanas_lista) > 1:
+            opciones_filtro.append(f"Semana anterior ({semanas_lista[1]})")
+        opciones_filtro.append("Ver todos los servicios")
+
+        filtro_sel = st.selectbox("Filtrar por:", opciones_filtro, index=0)
+
+        if "Esta semana" in filtro_sel:
+            df_mostrar = df_all[df_all["semana_operativa"] == semana_actual]
+        elif "Semana anterior" in filtro_sel:
+            df_mostrar = df_all[df_all["semana_operativa"] == semanas_lista[1]]
+        else:
+            df_mostrar = df_all
+
+        st.caption(f"Mostrando {len(df_mostrar)} viajes.")
+        st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+
         st.divider()
-        lista_ids = df_all["id_servicio"].tolist()
+        lista_ids = df_mostrar["id_servicio"].tolist()
         id_borrar = st.selectbox("Eliminar servicio:", lista_ids)
         if st.button("❌ Confirmar Eliminación"):
             conn = sqlite3.connect("produccion_viajes.db")
