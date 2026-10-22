@@ -104,9 +104,9 @@ def get_preasignados():
     conn.close()
     if row:
         return {
-            "pre1_monto": row[0], "pre1_estado": row[1],
-            "pre2_monto": row[2], "pre2_estado": row[3],
-            "pre3_monto": row[4], "pre3_estado": row[5]
+            "pre1_monto": float(row[0]), "pre1_estado": str(row[1]),
+            "pre2_monto": float(row[2]), "pre2_estado": str(row[3]),
+            "pre3_monto": float(row[4]), "pre3_estado": str(row[5])
         }
     return {
         "pre1_monto": 0.0, "pre1_estado": "Pendiente",
@@ -247,33 +247,40 @@ with tab1:
         ).reset_index()
 
         ultimo_dia = resumen_diario["fecha_operativa"].max()
-        prod_hoy = resumen_diario[resumen_diario["fecha_operativa"] == ultimo_dia]["produccion"].values[0]
-        prod_acumulada = df_sem["produccion_neta"].sum()
+        prod_hoy = float(resumen_diario[resumen_diario["fecha_operativa"] == ultimo_dia]["produccion"].values[0])
+        prod_acumulada_db = float(df_sem["produccion_neta"].sum())
         dias_trabajados = len(resumen_diario)
         
         meta_semanal_100 = regimen * 450.0
-        falta_semanal_total = max(0.0, meta_semanal_100 - prod_acumulada)
+        falta_semanal_db = max(0.0, meta_semanal_100 - prod_acumulada_db)
         
-        # Preasignados que sigan en estado "Pendiente"
+        # Preasignados que siguen activos (Pendiente)
         preasig_activos = sum([
             pre_data[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
             if pre_data[f"{p}_estado"] == "Pendiente"
         ])
-        total_guardia_proy = prod_hoy + preasig_activos
 
-        # Evaluación de pisos históricos cerrados
+        # Guardia de hoy en curso (lo hecho + lo preasignado)
+        total_guardia_proy = prod_hoy + preasig_activos
+        acumulado_con_proyeccion = prod_acumulada_db + preasig_activos
+        falta_semanal_proyectada = max(0.0, meta_semanal_100 - acumulado_con_proyeccion)
+
+        # Evaluación de pisos históricos ya cerrados (condición eliminatoria)
         dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != ultimo_dia]
         alguna_falla_piso_cerrada = (dias_cerrados["produccion"] < 300.0).any() if not dias_cerrados.empty else False
 
-        # Piso de hoy
+        # Evaluación del piso de hoy (contando preasignados)
         falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
         piso_hoy_ok = (falta_piso_hoy == 0)
 
-        # Ritmo acumulado
-        ritmo_esperado_acumulado = dias_trabajados * 450.0
-        diferencia_ritmo = prod_acumulada - ritmo_esperado_acumulado
+        # Meta de hoy: S/ 450
+        falta_meta_hoy = max(0.0, 450.0 - total_guardia_proy)
+        superavit_hoy = max(0.0, total_guardia_proy - 450.0)
+
+        # Días restantes de la semana (sin contar el de hoy)
         dias_futuros = max(0, regimen - dias_trabajados)
-        promedio_futuro = (falta_semanal_total / dias_futuros) if dias_futuros > 0 else 0.0
+        # Promedio futuro asumiendo que los preasignados se cobran
+        promedio_futuro = (falta_semanal_proyectada / dias_futuros) if dias_futuros > 0 else 0.0
 
         ahora_hora = datetime.now().hour
 
@@ -289,35 +296,46 @@ with tab1:
             else:
                 alerta_msg = f"⚠️ Meta obligatoria inmediata: asegurar el piso de S/ 300. Te faltan S/ {falta_piso_hoy:.2f} antes de cerrar guardia."
         else:
-            if falta_semanal_total <= 50.0 and falta_semanal_total > 0:
+            # Piso asegurado
+            if falta_semanal_proyectada <= 50.0 and falta_semanal_proyectada > 0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 CIERRE DE SEMANA CERCA"
-                alerta_msg = f"🎯 Estás a solo S/ {falta_semanal_total:.2f} de los S/ 2,250. Recuerda que para cobrar el bono debes cumplir siempre el piso de S/ 300 de cada día trabajado."
-            elif diferencia_ritmo >= 0:
+                alerta_msg = f"🎯 Proyectas quedar a solo S/ {falta_semanal_proyectada:.2f} de los S/ 2,250. Recuerda que para cobrar el bono debes cumplir siempre el piso de S/ 300 de cada día trabajado."
+            elif total_guardia_proy >= 450.0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 RITMO GANADOR"
                 if dias_futuros > 0:
-                    alerta_msg = f"🔥 ¡Excelente ritmo! Vas +S/ {diferencia_ritmo:.2f} sobre la meta acumulada. Con tus preasignados, tu promedio para los siguientes {dias_futuros} día(s) queda en S/ {promedio_futuro:.2f}/día."
+                    alerta_msg = f"🔥 ¡Meta de hoy asegurada (+S/ {superavit_hoy:.2f})! Con tus preasignados, tu promedio para los siguientes {dias_futuros} día(s) bajó a solo S/ {promedio_futuro:.2f}/día. Evalúa descansar si pasó la 1:00 AM."
                 else:
                     alerta_msg = "🏆 ¡Misión semanal completada! Bono de S/ 100 asegurado."
             else:
-                clase_card = "hero-card-ambar"
-                badge_estado = "🟡 PISO OK | RITMO POR RECUPERAR"
-                alerta_msg = f"✅ Piso de S/ 300 asegurado. Tu promedio diario para los siguientes {dias_futuros} día(s) es de S/ {promedio_futuro:.2f} para alcanzar los S/ 2,250."
+                # Piso cumplido, pero falta un saldo pequeño para los 450 de hoy
+                clase_card = "hero-card-verde" if preasig_activos > 0 else "hero-card-ambar"
+                badge_estado = "🟢 PISO OK | CERCA DE META"
+                if ahora_hora >= 1 and ahora_hora < 5:
+                    alerta_msg = (
+                        f"🌙 Piso asegurado (proyectas S/ {total_guardia_proy:.2f}). Te faltan solo S/ {falta_meta_hoy:.2f} para los S/ 450. "
+                        f"Como pasó la 1:00 AM, si guardas auto tu promedio para los siguientes {dias_futuros} día(s) queda en S/ {promedio_futuro:.2f}/día."
+                    )
+                else:
+                    alerta_msg = (
+                        f"💡 Piso asegurado. Hoy proyectas S/ {total_guardia_proy:.2f} (hecho + preasig); te faltan solo **S/ {falta_meta_hoy:.2f}** para cerrar en S/ 450. "
+                        f"Cumpliendo esto, tus siguientes {dias_futuros} día(s) quedan en S/ {promedio_futuro:.2f}/día."
+                    )
 
-        pct_semana = min(100.0, (prod_acumulada / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
+        pct_semana = min(100.0, (acumulado_con_proyeccion / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
 
         # HERO CARD
         st.markdown(f"""
         <div class="hero-card {clase_card}">
             <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {badge_estado}</div>
-            <div class="hero-meta">S/ {prod_acumulada:.2f} <span style="font-size:0.9rem; font-weight:400;">de S/ {meta_semanal_100:.0f} (Bono 100)</span></div>
-            <div class="hero-sub">Pendiente semanal: <strong>S/ {falta_semanal_total:.2f}</strong> ({pct_semana:.1f}% avance)</div>
+            <div class="hero-meta">S/ {acumulado_con_proyeccion:.2f} <span style="font-size:0.9rem; font-weight:400;">de S/ {meta_semanal_100:.0f} (Bono 100)</span></div>
+            <div class="hero-sub">Pendiente semanal: <strong>S/ {falta_semanal_proyectada:.2f}</strong> ({pct_semana:.1f}% avance con preasignados)</div>
             <hr style="margin: 6px 0; border-color: rgba(255,255,255,0.2);">
             <div style="font-size:0.88rem; margin-top:4px;">
-                <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig Activos:</strong> S/ {preasig_activos:.2f}<br>
-                <strong>Piso Hoy:</strong> {"✅ ASEGURADO" if piso_hoy_ok else f"<span style='color:#fca5a5;'>Faltan S/ {falta_piso_hoy:.2f}</span>"} &nbsp;|&nbsp;
-                <strong>Promedio Restante:</strong> S/ {promedio_futuro:.2f}/día
+                <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig:</strong> S/ {preasig_activos:.2f} &nbsp;|&nbsp; <strong>Total Proyectado:</strong> S/ {total_guardia_proy:.2f}<br>
+                <strong>Meta de Hoy (450):</strong> {"¡Cumplida!" if falta_meta_hoy == 0 else f"<span style='color:#fca5a5;'>Faltan S/ {falta_meta_hoy:.2f}</span>"} &nbsp;|&nbsp;
+                <strong>Promedio Siguientes Días:</strong> S/ {promedio_futuro:.2f}/día
             </div>
             <div class="hero-alert">{alerta_msg}</div>
         </div>
@@ -342,7 +360,7 @@ with tab1:
             for pid, label in [("pre1", "Pre 1"), ("pre2", "Pre 2"), ("pre3", "Pre 3")]:
                 col_a, col_b, col_c = st.columns([1.5, 2, 2])
                 with col_a:
-                    st.write(f"**{label}** ({pre_data[f'{pid}_monto']:.2f})")
+                    st.write(f"**{label}** (S/ {pre_data[f'{pid}_monto']:.2f})")
                 with col_b:
                     st.caption(f"Estado: {pre_data[f'{pid}_estado']}")
                 with col_c:
