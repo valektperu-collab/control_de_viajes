@@ -282,7 +282,7 @@ with tab1:
         # Promedio futuro asumiendo que los preasignados se cobran
         promedio_futuro = (falta_semanal_proyectada / dias_futuros) if dias_futuros > 0 else 0.0
 
-        ahora_hora = datetime.now().hour
+        ahora_hora = (datetime.utcnow() - timedelta(hours=5)).hour
 
         if alguna_falla_piso_cerrada:
             clase_card = "hero-card-rojo"
