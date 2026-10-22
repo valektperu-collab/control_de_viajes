@@ -128,6 +128,10 @@ def update_preasignado_estado(campo_estado, nuevo_estado):
     conn.commit()
     conn.close()
 
+# --- HORA PERÚ (UTC-5) ---
+def obtener_ahora_peru():
+    return datetime.utcnow() - timedelta(hours=5)
+
 # --- OPTIMIZACIÓN RÁPIDA DE IMÁGENES ---
 def optimizar_imagen(img_pil):
     w, h = img_pil.size
@@ -178,7 +182,8 @@ def procesar_capturas(imagenes):
     - metodo_pago: Empresa, Efectivo, Yape o Tarjeta.
     """
 
-    modelos = ["gemini-3.8-flash", "gemini-2.5-flash"]
+    # Modelo oficial vigente
+    modelos = ["gemini-3.8-flash"]
     ultimo_error = None
 
     for m in modelos:
@@ -215,11 +220,13 @@ regimen = st.sidebar.selectbox("Régimen", [5, 6], format_func=lambda x: f"{x}x{
 
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Guardia & Metas", "📸 Registrar", "💰 Abonos", "📋 Historial"])
 
+ahora_pe = obtener_ahora_peru()
+
 if "datos_autocompletados" not in st.session_state:
     st.session_state["datos_autocompletados"] = {
         "id_servicio": "",
-        "fecha": datetime.now().date(),
-        "hora": datetime.now().time(),
+        "fecha": ahora_pe.date(),
+        "hora": ahora_pe.time(),
         "tarifa_base": 0.0,
         "recargos": 0.0,
         "reembolsos": 0.0,
@@ -254,35 +261,29 @@ with tab1:
         meta_semanal_100 = regimen * 450.0
         falta_semanal_db = max(0.0, meta_semanal_100 - prod_acumulada_db)
         
-        # Preasignados que siguen activos (Pendiente)
         preasig_activos = sum([
             pre_data[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
             if pre_data[f"{p}_estado"] == "Pendiente"
         ])
 
-        # Guardia de hoy en curso (lo hecho + lo preasignado)
         total_guardia_proy = prod_hoy + preasig_activos
         acumulado_con_proyeccion = prod_acumulada_db + preasig_activos
         falta_semanal_proyectada = max(0.0, meta_semanal_100 - acumulado_con_proyeccion)
 
-        # Evaluación de pisos históricos ya cerrados (condición eliminatoria)
         dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != ultimo_dia]
         alguna_falla_piso_cerrada = (dias_cerrados["produccion"] < 300.0).any() if not dias_cerrados.empty else False
 
-        # Evaluación del piso de hoy (contando preasignados)
         falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
         piso_hoy_ok = (falta_piso_hoy == 0)
 
-        # Meta de hoy: S/ 450
         falta_meta_hoy = max(0.0, 450.0 - total_guardia_proy)
         superavit_hoy = max(0.0, total_guardia_proy - 450.0)
 
-        # Días restantes de la semana (sin contar el de hoy)
         dias_futuros = max(0, regimen - dias_trabajados)
-        # Promedio futuro asumiendo que los preasignados se cobran
         promedio_futuro = (falta_semanal_proyectada / dias_futuros) if dias_futuros > 0 else 0.0
 
-        ahora_hora = (datetime.utcnow() - timedelta(hours=5)).hour
+        # HORA EXACTA LIMA
+        hora_pe = ahora_pe.hour
 
         if alguna_falla_piso_cerrada:
             clase_card = "hero-card-rojo"
@@ -291,12 +292,11 @@ with tab1:
         elif not piso_hoy_ok:
             clase_card = "hero-card-ambar"
             badge_estado = f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
-            if ahora_hora >= 1 and ahora_hora < 5:
+            if hora_pe >= 1 and hora_pe < 5:
                 alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para los S/ 300 obligatorios de hoy (contando preasignados). ¡No cierres sin asegurar el piso!"
             else:
                 alerta_msg = f"⚠️ Meta obligatoria inmediata: asegurar el piso de S/ 300. Te faltan S/ {falta_piso_hoy:.2f} antes de cerrar guardia."
         else:
-            # Piso asegurado
             if falta_semanal_proyectada <= 50.0 and falta_semanal_proyectada > 0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 CIERRE DE SEMANA CERCA"
@@ -305,14 +305,13 @@ with tab1:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 RITMO GANADOR"
                 if dias_futuros > 0:
-                    alerta_msg = f"🔥 ¡Meta de hoy asegurada (+S/ {superavit_hoy:.2f})! Con tus preasignados, tu promedio para los siguientes {dias_futuros} día(s) bajó a solo S/ {promedio_futuro:.2f}/día. Evalúa descansar si pasó la 1:00 AM."
+                    alerta_msg = f"🔥 ¡Meta de hoy asegurada (+S/ {superavit_hoy:.2f})! Con tus preasignados, tu promedio para los siguientes {dias_futuros} día(s) bajó a solo S/ {promedio_futuro:.2f}/día. Si pasó la 1:00 AM, evalúa descansar."
                 else:
                     alerta_msg = "🏆 ¡Misión semanal completada! Bono de S/ 100 asegurado."
             else:
-                # Piso cumplido, pero falta un saldo pequeño para los 450 de hoy
                 clase_card = "hero-card-verde" if preasig_activos > 0 else "hero-card-ambar"
                 badge_estado = "🟢 PISO OK | CERCA DE META"
-                if ahora_hora >= 1 and ahora_hora < 5:
+                if hora_pe >= 1 and hora_pe < 5:
                     alerta_msg = (
                         f"🌙 Piso asegurado (proyectas S/ {total_guardia_proy:.2f}). Te faltan solo S/ {falta_meta_hoy:.2f} para los S/ 450. "
                         f"Como pasó la 1:00 AM, si guardas auto tu promedio para los siguientes {dias_futuros} día(s) queda en S/ {promedio_futuro:.2f}/día."
@@ -320,7 +319,7 @@ with tab1:
                 else:
                     alerta_msg = (
                         f"💡 Piso asegurado. Hoy proyectas S/ {total_guardia_proy:.2f} (hecho + preasig); te faltan solo **S/ {falta_meta_hoy:.2f}** para cerrar en S/ 450. "
-                        f"Cumpliendo esto, tus siguientes {dias_futuros} día(s) quedan en S/ {promedio_futuro:.2f}/día."
+                        f"Tienes buen flujo antes de la 1:00 AM. Cumpliendo esto, tus siguientes {dias_futuros} día(s) quedan en S/ {promedio_futuro:.2f}/día."
                     )
 
         pct_semana = min(100.0, (acumulado_con_proyeccion / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
@@ -341,7 +340,6 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-        # MÓDULO PREASIGNADOS CON BOTÓN EXPLÍCITO DE FIJACIÓN
         with st.expander("💼 Preasignados de la Guardia (Pre 1, 2, 3)", expanded=True):
             with st.form("form_preasignados"):
                 c1, c2, c3 = st.columns(3)
@@ -393,7 +391,7 @@ with tab2:
     c_esp1, c_esp2 = st.columns(2)
     with c_esp1:
         if st.button("🎓 Jornada Instructor / Guía", use_container_width=True):
-            f_hoy = datetime.now().date()
+            f_hoy = ahora_pe.date()
             sem_op = obtener_semana_operativa(f_hoy)
             id_inst = f"INST-{f_hoy.strftime('%Y%m%d')}"
             conn = sqlite3.connect("produccion_viajes.db")
@@ -406,7 +404,7 @@ with tab2:
                     monto_recargos, monto_reembolsos, produccion_neta, monto_total
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                id_inst, datetime.now().isoformat(), f_hoy.isoformat(), sem_op,
+                id_inst, ahora_pe.isoformat(), f_hoy.isoformat(), sem_op,
                 "Instructor / Guía", "Empresa", "Especial", "Empresa",
                 "Sede", "Ruta Guía", 0.0, 0.0, 450.0,
                 0.0, 0.0, 450.0, 450.0
@@ -418,7 +416,7 @@ with tab2:
 
     with c_esp2:
         if st.button("🏨 Guardia en CDS (Hotel Costa del Sol)", use_container_width=True):
-            f_hoy = datetime.now().date()
+            f_hoy = ahora_pe.date()
             sem_op = obtener_semana_operativa(f_hoy)
             id_cds = f"CDS-{f_hoy.strftime('%Y%m%d')}"
             conn = sqlite3.connect("produccion_viajes.db")
@@ -431,7 +429,7 @@ with tab2:
                     monto_recargos, monto_reembolsos, produccion_neta, monto_total
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                id_cds, datetime.now().isoformat(), f_hoy.isoformat(), sem_op,
+                id_cds, ahora_pe.isoformat(), f_hoy.isoformat(), sem_op,
                 "CDS - Costa del Sol", "Empresa", "Especial", "Empresa",
                 "Hotel Costa del Sol", "Aeropuerto / Sede", 0.0, 0.0, 450.0,
                 0.0, 0.0, 450.0, 450.0
@@ -455,8 +453,8 @@ with tab2:
                         f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 21)))
                         h_dt = time(int(datos.get("hora", 0)), int(datos.get("minuto", 0)))
                     except Exception:
-                        f_dt = datetime.now().date()
-                        h_dt = datetime.now().time()
+                        f_dt = ahora_pe.date()
+                        h_dt = ahora_pe.time()
 
                     asig_raw = str(datos.get("tipo_asignacion", "")).lower()
                     if "cds" in asig_raw or "costa" in asig_raw:
@@ -570,7 +568,7 @@ with tab3:
             with c2:
                 if not esta_enviado:
                     if st.button("Marcar Enviado", key=f"env_{id_serv}"):
-                        ahora_str = datetime.now().strftime("%d/%m/%y %H:%M")
+                        ahora_str = ahora_pe.strftime("%d/%m/%y %H:%M")
                         conn = sqlite3.connect("produccion_viajes.db")
                         cur = conn.cursor()
                         cur.execute("UPDATE viajes SET abono_enviado = 1, fecha_hora_abono = ? WHERE id_servicio = ?", (ahora_str, id_serv))
