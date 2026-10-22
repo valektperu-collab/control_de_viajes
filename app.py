@@ -49,9 +49,6 @@ st.markdown("""
         margin-top: 8px;
         line-height: 1.35;
     }
-    .btn-especial {
-        margin-bottom: 6px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -82,22 +79,54 @@ def init_db():
             fecha_hora_abono TEXT
         )
     ''')
-    try:
-        c.execute("ALTER TABLE viajes ADD COLUMN metodo_pago TEXT DEFAULT 'Empresa'")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE viajes ADD COLUMN abono_enviado INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE viajes ADD COLUMN fecha_hora_abono TEXT")
-    except Exception:
-        pass
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS config_preasignados (
+            id INTEGER PRIMARY KEY,
+            pre1_monto REAL DEFAULT 0.0,
+            pre1_estado TEXT DEFAULT 'Pendiente',
+            pre2_monto REAL DEFAULT 0.0,
+            pre2_estado TEXT DEFAULT 'Pendiente',
+            pre3_monto REAL DEFAULT 0.0,
+            pre3_estado TEXT DEFAULT 'Pendiente'
+        )
+    ''')
+    c.execute("INSERT OR IGNORE INTO config_preasignados (id) VALUES (1)")
     conn.commit()
     conn.close()
 
 init_db()
+
+def get_preasignados():
+    conn = sqlite3.connect("produccion_viajes.db")
+    c = conn.cursor()
+    c.execute("SELECT pre1_monto, pre1_estado, pre2_monto, pre2_estado, pre3_monto, pre3_estado FROM config_preasignados WHERE id = 1")
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            "pre1_monto": row[0], "pre1_estado": row[1],
+            "pre2_monto": row[2], "pre2_estado": row[3],
+            "pre3_monto": row[4], "pre3_estado": row[5]
+        }
+    return {
+        "pre1_monto": 0.0, "pre1_estado": "Pendiente",
+        "pre2_monto": 0.0, "pre2_estado": "Pendiente",
+        "pre3_monto": 0.0, "pre3_estado": "Pendiente"
+    }
+
+def update_preasignado_monto(p1, p2, p3):
+    conn = sqlite3.connect("produccion_viajes.db")
+    c = conn.cursor()
+    c.execute("UPDATE config_preasignados SET pre1_monto = ?, pre2_monto = ?, pre3_monto = ? WHERE id = 1", (p1, p2, p3))
+    conn.commit()
+    conn.close()
+
+def update_preasignado_estado(campo_estado, nuevo_estado):
+    conn = sqlite3.connect("produccion_viajes.db")
+    c = conn.cursor()
+    c.execute(f"UPDATE config_preasignados SET {campo_estado} = ? WHERE id = 1", (nuevo_estado,))
+    conn.commit()
+    conn.close()
 
 # --- OPTIMIZACIÓN RÁPIDA DE IMÁGENES ---
 def optimizar_imagen(img_pil):
@@ -199,17 +228,13 @@ if "datos_autocompletados" not in st.session_state:
         "metodo_pago": "Empresa"
     }
 
-for pre_id in ["pre1", "pre2", "pre3"]:
-    if f"{pre_id}_monto" not in st.session_state:
-        st.session_state[f"{pre_id}_monto"] = 0.0
-    if f"{pre_id}_estado" not in st.session_state:
-        st.session_state[f"{pre_id}_estado"] = "Pendiente"
-
 # --- TAB 1: GUARDIA & METAS ---
 with tab1:
     conn = sqlite3.connect("produccion_viajes.db")
     df = pd.read_sql_query("SELECT * FROM viajes", conn)
     conn.close()
+
+    pre_data = get_preasignados()
 
     if not df.empty:
         semanas_disp = sorted(df["semana_operativa"].unique(), reverse=True)
@@ -229,28 +254,27 @@ with tab1:
         meta_semanal_100 = regimen * 450.0
         falta_semanal_total = max(0.0, meta_semanal_100 - prod_acumulada)
         
-        # Preasignados activos
+        # Preasignados que sigan en estado "Pendiente"
         preasig_activos = sum([
-            st.session_state[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
-            if st.session_state[f"{p}_estado"] == "Pendiente"
+            pre_data[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
+            if pre_data[f"{p}_estado"] == "Pendiente"
         ])
         total_guardia_proy = prod_hoy + preasig_activos
 
-        # 1. EVALUACIÓN DE PISOS HISTÓRICOS (Condición eliminatoria estricta)
+        # Evaluación de pisos históricos cerrados
         dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != ultimo_dia]
         alguna_falla_piso_cerrada = (dias_cerrados["produccion"] < 300.0).any() if not dias_cerrados.empty else False
 
-        # 2. EVALUACIÓN DE PISO DE HOY
+        # Piso de hoy
         falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
         piso_hoy_ok = (falta_piso_hoy == 0)
 
-        # 3. EVALUACIÓN DE RITMO SEMANAL
+        # Ritmo acumulado
         ritmo_esperado_acumulado = dias_trabajados * 450.0
         diferencia_ritmo = prod_acumulada - ritmo_esperado_acumulado
         dias_futuros = max(0, regimen - dias_trabajados)
         promedio_futuro = (falta_semanal_total / dias_futuros) if dias_futuros > 0 else 0.0
 
-        # Determinación del Color de la Hero Card y Mensaje Táctico
         ahora_hora = datetime.now().hour
 
         if alguna_falla_piso_cerrada:
@@ -261,11 +285,10 @@ with tab1:
             clase_card = "hero-card-ambar"
             badge_estado = f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
             if ahora_hora >= 1 and ahora_hora < 5:
-                alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para los S/ 300 obligatorios de hoy. ¡No cierres sin cumplir el piso o pierdes el bono de toda la semana!"
+                alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para los S/ 300 obligatorios de hoy (contando preasignados). ¡No cierres sin asegurar el piso!"
             else:
-                alerta_msg = f"⚠️ Meta obligatoria inmediata: asegurar el piso de S/ 300. Te faltan S/ {falta_piso_hoy:.2f} antes de que termine el turno."
+                alerta_msg = f"⚠️ Meta obligatoria inmediata: asegurar el piso de S/ 300. Te faltan S/ {falta_piso_hoy:.2f} antes de cerrar guardia."
         else:
-            # Piso asegurado
             if falta_semanal_total <= 50.0 and falta_semanal_total > 0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 CIERRE DE SEMANA CERCA"
@@ -274,7 +297,7 @@ with tab1:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 RITMO GANADOR"
                 if dias_futuros > 0:
-                    alerta_msg = f"🔥 ¡Excelente ritmo! Vas +S/ {diferencia_ritmo:.2f} sobre la meta acumulada. Gracias a tu colchón, tu promedio para los siguientes {dias_futuros} día(s) bajó a solo S/ {promedio_futuro:.2f}/día. Evalúa descansar."
+                    alerta_msg = f"🔥 ¡Excelente ritmo! Vas +S/ {diferencia_ritmo:.2f} sobre la meta acumulada. Con tus preasignados, tu promedio para los siguientes {dias_futuros} día(s) queda en S/ {promedio_futuro:.2f}/día."
                 else:
                     alerta_msg = "🏆 ¡Misión semanal completada! Bono de S/ 100 asegurado."
             else:
@@ -284,7 +307,7 @@ with tab1:
 
         pct_semana = min(100.0, (prod_acumulada / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
 
-        # RENDER HERO CARD
+        # HERO CARD
         st.markdown(f"""
         <div class="hero-card {clase_card}">
             <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {badge_estado}</div>
@@ -292,7 +315,7 @@ with tab1:
             <div class="hero-sub">Pendiente semanal: <strong>S/ {falta_semanal_total:.2f}</strong> ({pct_semana:.1f}% avance)</div>
             <hr style="margin: 6px 0; border-color: rgba(255,255,255,0.2);">
             <div style="font-size:0.88rem; margin-top:4px;">
-                <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig:</strong> S/ {preasig_activos:.2f}<br>
+                <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig Activos:</strong> S/ {preasig_activos:.2f}<br>
                 <strong>Piso Hoy:</strong> {"✅ ASEGURADO" if piso_hoy_ok else f"<span style='color:#fca5a5;'>Faltan S/ {falta_piso_hoy:.2f}</span>"} &nbsp;|&nbsp;
                 <strong>Promedio Restante:</strong> S/ {promedio_futuro:.2f}/día
             </div>
@@ -300,24 +323,42 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-        with st.expander("💼 Preasignados de la Guardia (Pre 1, 2, 3)", expanded=False):
+        # MÓDULO PREASIGNADOS CON BOTÓN EXPLÍCITO DE FIJACIÓN
+        with st.expander("💼 Preasignados de la Guardia (Pre 1, 2, 3)", expanded=True):
+            with st.form("form_preasignados"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    val_p1 = st.number_input("Pre 1 (S/)", min_value=0.0, value=float(pre_data["pre1_monto"]), step=5.0)
+                with c2:
+                    val_p2 = st.number_input("Pre 2 (S/)", min_value=0.0, value=float(pre_data["pre2_monto"]), step=5.0)
+                with c3:
+                    val_p3 = st.number_input("Pre 3 (S/)", min_value=0.0, value=float(pre_data["pre3_monto"]), step=5.0)
+                
+                if st.form_submit_button("💾 Fijar Preasignados", use_container_width=True):
+                    update_preasignado_monto(val_p1, val_p2, val_p3)
+                    st.rerun()
+
+            st.caption("Gestionar Estado (al completarse o caerse):")
             for pid, label in [("pre1", "Pre 1"), ("pre2", "Pre 2"), ("pre3", "Pre 3")]:
-                col_a, col_b, col_c = st.columns([2, 1.5, 1.5])
+                col_a, col_b, col_c = st.columns([1.5, 2, 2])
                 with col_a:
-                    st.session_state[f"{pid}_monto"] = st.number_input(f"{label} (S/)", min_value=0.0, value=st.session_state[f"{pid}_monto"], step=5.0, key=f"inp_{pid}")
+                    st.write(f"**{label}** ({pre_data[f'{pid}_monto']:.2f})")
                 with col_b:
-                    st.caption(f"Estado: {st.session_state[f'{pid}_estado']}")
+                    st.caption(f"Estado: {pre_data[f'{pid}_estado']}")
                 with col_c:
-                    if st.session_state[f"{pid}_estado"] == "Pendiente":
-                        if st.button("✅ Hecho", key=f"ok_{pid}"):
-                            st.session_state[f"{pid}_estado"] = "Hecho"
-                            st.rerun()
-                        if st.button("❌ Caído", key=f"no_{pid}"):
-                            st.session_state[f"{pid}_estado"] = "Caído"
-                            st.rerun()
+                    if pre_data[f"{pid}_estado"] == "Pendiente":
+                        c_b1, c_b2 = st.columns(2)
+                        with c_b1:
+                            if st.button("✅", key=f"ok_{pid}"):
+                                update_preasignado_estado(f"{pid}_estado", "Hecho")
+                                st.rerun()
+                        with c_b2:
+                            if st.button("❌", key=f"no_{pid}"):
+                                update_preasignado_estado(f"{pid}_estado", "Caído")
+                                st.rerun()
                     else:
                         if st.button("Reactivar", key=f"rst_{pid}"):
-                            st.session_state[f"{pid}_estado"] = "Pendiente"
+                            update_preasignado_estado(f"{pid}_estado", "Pendiente")
                             st.rerun()
 
         st.markdown("#### 📋 Detalle de la Semana")
