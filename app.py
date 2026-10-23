@@ -114,7 +114,6 @@ def get_preasignados():
         "pre3_monto": 0.0, "pre3_estado": "Pendiente"
     }
 
-# Reset automático a 'Pendiente' cuando se ingresa un monto nuevo mayor a 0
 def update_preasignado_monto(p1, p2, p3):
     conn = sqlite3.connect("produccion_viajes.db")
     c = conn.cursor()
@@ -207,7 +206,7 @@ def procesar_capturas(imagenes):
                 ultimo_error = e
                 continue
 
-    raise Exception(f"Servidor temporalmente ocupado. Pulsa nuevamente '⚡ Extraer Rápido': {ultimo_error}")
+    raise Exception(f"Servidor temporalmente ocupado: {ultimo_error}")
 
 def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
     if tipo_turno == "Nocturno" and dt.hour < hora_corte:
@@ -273,12 +272,11 @@ with tab1:
             if pre_data[f"{p}_estado"] == "Pendiente"
         ])
 
-        # Totales proyectados
         total_guardia_proy = prod_hoy + preasig_activos
         acumulado_con_proyeccion = prod_acumulada_db + preasig_activos
         falta_semanal_proyectada = max(0.0, meta_semanal_100 - acumulado_con_proyeccion)
 
-        # Evaluación de pisos históricos ya cerrados (condición eliminatoria estricta)
+        # Evaluación de pisos históricos ya cerrados (condición eliminatoria)
         dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != ultimo_dia]
         alguna_falla_piso_cerrada = (dias_cerrados["produccion"] < 300.0).any() if not dias_cerrados.empty else False
 
@@ -296,7 +294,7 @@ with tab1:
 
         dias_futuros = max(0, regimen - dias_trabajados)
 
-        # BLINDAJE DE PISO: La meta de los siguientes días nunca puede ser inferior al piso eliminatorio de S/ 300
+        # BLINDAJE DE PISO: La meta nunca marca menos de S/ 300
         if dias_futuros > 0:
             promedio_matematico = falta_semanal_proyectada / dias_futuros
             meta_real_proximos_dias = max(300.0, promedio_matematico)
@@ -305,33 +303,31 @@ with tab1:
 
         hora_pe = ahora_pe.hour
 
-        # DECISIÓN DEL SEMÁFORO Y MENSAJES TÁCTICOS
         if alguna_falla_piso_cerrada:
             clase_card = "hero-card-rojo"
             badge_estado = "🔴 BONO ANULADO (Falla en Piso Diario)"
-            alerta_msg = "🚫 Un día anterior cerró con menos de S/ 300. La empresa anuló el bono de S/ 100 por incumplimiento de piso diario."
+            alerta_msg = "🚫 Un día anterior cerró con menos de S/ 300. La empresa no liquidará bono semanal por incumplimiento de piso."
         elif not piso_hoy_ok:
             clase_card = "hero-card-ambar"
             badge_estado = f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
             if hora_pe >= 1 and hora_pe < 5:
-                alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para asegurar los S/ 300 obligatorios de hoy. ¡No cierres turno sin cumplir el piso o pierdes el bono de toda la semana!"
+                alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para los S/ 300 obligatorios de hoy. ¡No cierres sin asegurar el piso!"
             else:
                 alerta_msg = f"⚠️ Meta obligatoria inmediata: asegurar el piso de S/ 300. Te faltan S/ {falta_piso_hoy:.2f} antes de cerrar guardia."
         else:
-            # Piso de hoy asegurado
             if falta_semanal_proyectada == 0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🏆 VOLUMEN SEMANAL LOGRADO"
                 if dias_futuros > 0:
-                    alerta_msg = f"🏆 ¡Superaste los S/ {meta_semanal_100:.0f}! En tus {dias_futuros} día(s) restantes tu única meta obligatoria será cumplir el piso de S/ 300.00 por día trabajado para cobrar el bono."
+                    alerta_msg = f"🏆 ¡Superaste los S/ {meta_semanal_100:.0f}! En tus {dias_futuros} día(s) restantes tu única meta obligatoria será cumplir el piso de S/ 300.00 por día trabajado."
                 else:
-                    alerta_msg = "🏆 ¡Misión semanal completada! Volumen y pisos asegurados. Bono de S/ 100 ganado."
+                    alerta_msg = "🏆 ¡Misión semanal completada! Bono de S/ 100 asegurado."
             elif falta_semanal_proyectada < 300.0 and dias_futuros > 0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 META CASI CERRADA"
                 alerta_msg = (
                     f"🔥 Para la meta semanal solo faltan S/ {falta_semanal_proyectada:.2f}, pero tu meta OBLIGATORIA para los siguientes "
-                    f"{dias_futuros} día(s) será cumplir el piso de S/ 300.00 por guardia para no anular el bono ante la empresa."
+                    f"{dias_futuros} día(s) será cumplir el piso de S/ 300.00 por guardia para validar el bono ante la empresa."
                 )
             elif superavit_acumulado_global >= 0:
                 clase_card = "hero-card-verde"
@@ -342,7 +338,7 @@ with tab1:
                         f"Tu meta requerida para tus siguientes {dias_futuros} día(s) es de S/ {meta_real_proximos_dias:.2f}/día. Si pasó la 1:00 AM, evalúa descansar."
                     )
                 else:
-                    alerta_msg = "🏆 ¡Semana defendida con éxito! Bono listo."
+                    alerta_msg = "🏆 ¡Semana asegurada! Bono listo."
             else:
                 clase_card = "hero-card-verde" if preasig_activos > 0 else "hero-card-ambar"
                 badge_estado = "🟢 PISO OK | DEFENDIENDO PROMEDIO"
@@ -418,7 +414,7 @@ with tab1:
         resumen_mostrar["Piso S/ 300"] = resumen_mostrar["produccion"].apply(lambda x: "✅ OK" if x >= 300.0 else "❌ Falla")
         st.dataframe(resumen_mostrar, use_container_width=True)
     else:
-        st.info("Sin registros aún. Ve a la pestaña '📸 Registrar' para cargar tu primer viaje.")
+        st.info("Sin registros aún en la base de datos. Si tienes tu archivo de respaldo, restaúralo en la pestaña '📋 Historial'.")
 
 # --- TAB 2: REGISTRAR VIAJE Y JORNADAS ESPECIALES ---
 with tab2:
@@ -621,9 +617,64 @@ with tab3:
     else:
         st.info("No hay viajes en Efectivo o Yape.")
 
-# --- TAB 4: HISTORIAL Y RESPALDO ANTIPÉRDIDA ---
+# --- TAB 4: HISTORIAL, RESPALDO Y RESTAURACIÓN ---
 with tab4:
-    st.markdown("#### 📋 Historial de Servicios")
+    st.markdown("#### 🔄 Restaurar o Respaldar Semana")
+    
+    # MÓDULO DE RESTAURACIÓN DE CSV
+    with st.expander("📤 Restaurar datos desde Respaldo CSV", expanded=False):
+        csv_subido = st.file_uploader("Selecciona tu archivo .csv guardado", type=["csv"], key="uploader_backup")
+        if csv_subido is not None:
+            if st.button("⚡ Cargar y Restaurar Datos", use_container_width=True):
+                try:
+                    df_res = pd.read_csv(csv_subido)
+                    conn = sqlite3.connect("produccion_viajes.db")
+                    c = conn.cursor()
+                    
+                    # Si es el archivo de detalle diario exportado
+                    if "fecha_operativa" in df_res.columns and "produccion" in df_res.columns:
+                        for _, r in df_res.iterrows():
+                            f_op_str = str(r["fecha_operativa"])
+                            f_op_dt = datetime.strptime(f_op_str, "%Y-%m-%d").date()
+                            sem_op_str = obtener_semana_operativa(f_op_dt)
+                            prod_val = float(r["produccion"])
+                            id_rest = f"REC-{f_op_str.replace('-', '')}"
+                            c.execute('''
+                                INSERT OR REPLACE INTO viajes (
+                                    id_servicio, fecha_hora_viaje, fecha_operativa, semana_operativa,
+                                    tipo_asignacion, tipo_usuario, categoria_servicio, metodo_pago,
+                                    origen, destino, distancia_km, duracion_min, tarifa_base,
+                                    monto_recargos, monto_reembolsos, produccion_neta, monto_total
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                id_rest, f"{f_op_str}T20:00:00", f_op_str, sem_op_str,
+                                "Directo", "Empresa", "Resumen", "Empresa",
+                                "Ruta", "Destino", 0.0, 0.0, prod_val,
+                                0.0, 0.0, prod_val, prod_val
+                            ))
+                    # Si es el archivo con el detalle viaje por viaje
+                    elif "id_servicio" in df_res.columns:
+                        for _, r in df_res.iterrows():
+                            c.execute('''
+                                INSERT OR REPLACE INTO viajes (
+                                    id_servicio, fecha_hora_viaje, fecha_operativa, semana_operativa,
+                                    tipo_asignacion, tipo_usuario, categoria_servicio, metodo_pago,
+                                    origen, destino, distancia_km, duracion_min, tarifa_base,
+                                    monto_recargos, monto_reembolsos, produccion_neta, monto_total
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                str(r["id_servicio"]), str(r.get("fecha_hora_viaje", "")), str(r["fecha_operativa"]), str(r["semana_operativa"]),
+                                str(r.get("tipo_asignacion", "Directo")), "Empresa", "Lite", str(r.get("metodo_pago", "Empresa")),
+                                "", "", 0.0, 0.0, float(r.get("produccion_neta", 0.0)),
+                                0.0, float(r.get("monto_reembolsos", 0.0)), float(r.get("produccion_neta", 0.0)), float(r.get("monto_total", 0.0))
+                            ))
+                    conn.commit()
+                    conn.close()
+                    st.success("¡Datos restaurados con éxito! Revisa la pestaña '📊 Guardia & Metas'.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al restaurar: {e}")
+
     conn = sqlite3.connect("produccion_viajes.db")
     df_all = pd.read_sql_query("""
         SELECT 
@@ -641,7 +692,6 @@ with tab4:
     conn.close()
 
     if not df_all.empty:
-        # BOTÓN DE RESPALDO DE SEGURIDAD
         csv_data = df_all.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Descargar Respaldo de Seguridad (CSV)",
@@ -651,6 +701,7 @@ with tab4:
             use_container_width=True
         )
 
+        st.markdown("#### 📋 Historial de Servicios")
         semanas_lista = sorted(df_all["semana_operativa"].unique().tolist(), reverse=True)
         semana_actual = semanas_lista[0]
         
@@ -683,4 +734,4 @@ with tab4:
             st.success("Registro eliminado.")
             st.rerun()
     else:
-        st.info("Sin registros.")
+        st.info("Sin registros en la tabla.")
