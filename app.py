@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta, date, time
 import json
 import io
+import requests
 from PIL import Image
 from google import genai
 
@@ -52,7 +53,65 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- BASE DE DATOS LOCAL ---
+# URL WEBHOOK GOOGLE SHEETS
+GSHEETS_URL = "https://script.google.com/macros/s/AKfycbzbnRBVGJC3AhvoM1gbE7V1p6we8DxpfRyhQfxP0zIJ1G9xCG1YOA6TLtrOwfHh588/exec"
+
+# --- FUNCIONES DE SINCRONIZACIÓN GOOGLE SHEETS ---
+def obtener_viajes_remotos():
+    try:
+        r = requests.get(GSHEETS_URL, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data)
+                # Convertir numéricos
+                cols_num = ["distancia_km", "duracion_min", "tarifa_base", "monto_recargos", "monto_reembolsos", "produccion_neta", "monto_total"]
+                for c in cols_num:
+                    if c in df.columns:
+                        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+                if "abono_enviado" in df.columns:
+                    df["abono_enviado"] = pd.to_numeric(df["abono_enviado"], errors="coerce").fillna(0).astype(int)
+                return df
+    except Exception as e:
+        st.warning(f"Aviso de sincronización nube: {e}")
+    return pd.DataFrame()
+
+def guardar_viaje_remoto(datos_dict):
+    try:
+        payload = {
+            "action": "insert_or_replace",
+            "data": datos_dict
+        }
+        r = requests.post(GSHEETS_URL, json=payload, timeout=12)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+def eliminar_viaje_remoto(id_servicio):
+    try:
+        payload = {
+            "action": "delete",
+            "id_servicio": str(id_servicio)
+        }
+        r = requests.post(GSHEETS_URL, json=payload, timeout=12)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+def actualizar_abono_remoto(id_servicio, estado, fecha_abono=""):
+    try:
+        payload = {
+            "action": "update_abono",
+            "id_servicio": str(id_servicio),
+            "abono_enviado": int(estado),
+            "fecha_hora_abono": str(fecha_abono)
+        }
+        r = requests.post(GSHEETS_URL, json=payload, timeout=12)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+# --- BASE DE DATOS LOCAL (RÉPLICA Y PREASIGNADOS) ---
 def init_db():
     conn = sqlite3.connect("produccion_viajes.db")
     c = conn.cursor()
@@ -138,7 +197,7 @@ def update_preasignado_estado(campo_estado, nuevo_estado):
 def obtener_ahora_peru():
     return datetime.utcnow() - timedelta(hours=5)
 
-# --- OPTIMIZACIÓN RÁPIDA DE IMÁGENES ---
+# --- PROCESAMIENTO CON IA ---
 def optimizar_imagen(img_pil):
     w, h = img_pil.size
     if w > 800:
@@ -153,7 +212,6 @@ def optimizar_imagen(img_pil):
     buffer.seek(0)
     return Image.open(buffer)
 
-# --- PROCESAMIENTO CON IA CON REINTENTO AUTOMÁTICO ---
 def procesar_capturas(imagenes):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
@@ -192,7 +250,7 @@ def procesar_capturas(imagenes):
     ultimo_error = None
 
     for m in modelos:
-        for intento in range(2):
+        for _ in range(2):
             try:
                 contents = imagenes_ligeras + [prompt]
                 response = client.models.generate_content(model=m, contents=contents)
@@ -216,8 +274,18 @@ def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
 def obtener_semana_operativa(fecha_op):
     return f"{fecha_op.isocalendar()[0]}-W{fecha_op.isocalendar()[1]:02d}"
 
+# --- CARGA GENERAL DE VIAJES (NUBE CON FALLBACK LOCAL) ---
+def cargar_viajes():
+    df_remoto = obtener_viajes_remotos()
+    if not df_remoto.empty and "id_servicio" in df_remoto.columns:
+        return df_remoto
+    conn = sqlite3.connect("produccion_viajes.db")
+    df_local = pd.read_sql_query("SELECT * FROM viajes", conn)
+    conn.close()
+    return df_local
+
 # --- ENCABEZADO ---
-st.markdown('<div class="titulo-app">🚖 Copiloto de Metas y Guardia</div>', unsafe_allow_html=True)
+st.markdown('<div class="titulo-app">🚖 Copiloto de Metas y Guardia (Google Sheets ☁️)</div>', unsafe_allow_html=True)
 
 st.sidebar.header("⚙️ Ajustes")
 tipo_turno = st.sidebar.selectbox("Turno", ["Nocturno", "Diurno"])
@@ -243,16 +311,15 @@ if "datos_autocompletados" not in st.session_state:
 
 # --- TAB 1: GUARDIA & METAS ---
 with tab1:
-    conn = sqlite3.connect("produccion_viajes.db")
-    df = pd.read_sql_query("SELECT * FROM viajes", conn)
-    conn.close()
-
+    df = cargar_viajes()
     pre_data = get_preasignados()
 
-    if not df.empty:
-        semanas_disp = sorted(df["semana_operativa"].unique(), reverse=True)
+    if not df.empty and "semana_operativa" in df.columns:
+        semanas_disp = sorted([str(s) for s in df["semana_operativa"].dropna().unique()], reverse=True)
         semana_sel = st.selectbox("Semana Operativa", semanas_disp)
-        df_sem = df[df["semana_operativa"] == semana_sel]
+        df_sem = df[df["semana_operativa"] == semana_sel].copy()
+
+        df_sem["produccion_neta"] = pd.to_numeric(df_sem["produccion_neta"], errors="coerce").fillna(0.0)
 
         resumen_diario = df_sem.groupby("fecha_operativa").agg(
             viajes=('id_servicio', 'count'),
@@ -266,7 +333,6 @@ with tab1:
         
         meta_semanal_100 = regimen * 450.0
         
-        # Preasignados que siguen activos (Pendiente)
         preasig_activos = sum([
             pre_data[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
             if pre_data[f"{p}_estado"] == "Pendiente"
@@ -276,25 +342,21 @@ with tab1:
         acumulado_con_proyeccion = prod_acumulada_db + preasig_activos
         falta_semanal_proyectada = max(0.0, meta_semanal_100 - acumulado_con_proyeccion)
 
-        # Evaluación de pisos históricos ya cerrados (condición eliminatoria)
         dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != ultimo_dia]
         alguna_falla_piso_cerrada = (dias_cerrados["produccion"] < 300.0).any() if not dias_cerrados.empty else False
 
-        # Piso de hoy
         falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
         piso_hoy_ok = (falta_piso_hoy == 0)
 
-        # Meta nominal diaria (450)
         falta_meta_hoy = max(0.0, 450.0 - total_guardia_proy)
         superavit_hoy = max(0.0, total_guardia_proy - 450.0)
 
-        # Ritmo acumulado teórico
         ritmo_esperado_acumulado = dias_trabajados * 450.0
         superavit_acumulado_global = acumulado_con_proyeccion - ritmo_esperado_acumulado
 
         dias_futuros = max(0, regimen - dias_trabajados)
 
-        # BLINDAJE DE PISO: La meta nunca marca menos de S/ 300
+        # Blindaje de piso: la meta restante nunca baja de 300
         if dias_futuros > 0:
             promedio_matematico = falta_semanal_proyectada / dias_futuros
             meta_real_proximos_dias = max(300.0, promedio_matematico)
@@ -306,7 +368,7 @@ with tab1:
         if alguna_falla_piso_cerrada:
             clase_card = "hero-card-rojo"
             badge_estado = "🔴 BONO ANULADO (Falla en Piso Diario)"
-            alerta_msg = "🚫 Un día anterior cerró con menos de S/ 300. La empresa no liquidará bono semanal por incumplimiento de piso."
+            alerta_msg = "🚫 Un día anterior cerró con menos de S/ 300. La empresa anuló el bono de S/ 100 por incumplimiento de piso diario."
         elif not piso_hoy_ok:
             clase_card = "hero-card-ambar"
             badge_estado = f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
@@ -319,15 +381,15 @@ with tab1:
                 clase_card = "hero-card-verde"
                 badge_estado = "🏆 VOLUMEN SEMANAL LOGRADO"
                 if dias_futuros > 0:
-                    alerta_msg = f"🏆 ¡Superaste los S/ {meta_semanal_100:.0f}! En tus {dias_futuros} día(s) restantes tu única meta obligatoria será cumplir el piso de S/ 300.00 por día trabajado."
+                    alerta_msg = f"🏆 ¡Superaste los S/ {meta_semanal_100:.0f}! En tus {dias_futuros} día(s) restantes tu única meta obligatoria será cumplir el piso de S/ 300.00 por guardia."
                 else:
-                    alerta_msg = "🏆 ¡Misión semanal completada! Bono de S/ 100 asegurado."
+                    alerta_msg = "🏆 ¡Misión semanal completada! Volumen y pisos asegurados. Bono de S/ 100 asegurado."
             elif falta_semanal_proyectada < 300.0 and dias_futuros > 0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 META CASI CERRADA"
                 alerta_msg = (
                     f"🔥 Para la meta semanal solo faltan S/ {falta_semanal_proyectada:.2f}, pero tu meta OBLIGATORIA para los siguientes "
-                    f"{dias_futuros} día(s) será cumplir el piso de S/ 300.00 por guardia para validar el bono ante la empresa."
+                    f"{dias_futuros} día(s) será cumplir el piso de S/ 300.00 por guardia para no anular el bono."
                 )
             elif superavit_acumulado_global >= 0:
                 clase_card = "hero-card-verde"
@@ -414,7 +476,7 @@ with tab1:
         resumen_mostrar["Piso S/ 300"] = resumen_mostrar["produccion"].apply(lambda x: "✅ OK" if x >= 300.0 else "❌ Falla")
         st.dataframe(resumen_mostrar, use_container_width=True)
     else:
-        st.info("Sin registros aún en la base de datos. Si tienes tu archivo de respaldo, restaúralo en la pestaña '📋 Historial'.")
+        st.info("Sin registros en Google Sheets ni localmente. Restaura tu archivo de respaldo en la pestaña '📋 Historial' para sincronizar la nube.")
 
 # --- TAB 2: REGISTRAR VIAJE Y JORNADAS ESPECIALES ---
 with tab2:
@@ -425,24 +487,29 @@ with tab2:
             f_hoy = ahora_pe.date()
             sem_op = obtener_semana_operativa(f_hoy)
             id_inst = f"INST-{f_hoy.strftime('%Y%m%d')}"
-            conn = sqlite3.connect("produccion_viajes.db")
-            c = conn.cursor()
-            c.execute('''
-                INSERT OR REPLACE INTO viajes (
-                    id_servicio, fecha_hora_viaje, fecha_operativa, semana_operativa,
-                    tipo_asignacion, tipo_usuario, categoria_servicio, metodo_pago,
-                    origen, destino, distancia_km, duracion_min, tarifa_base,
-                    monto_recargos, monto_reembolsos, produccion_neta, monto_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                id_inst, ahora_pe.isoformat(), f_hoy.isoformat(), sem_op,
-                "Instructor / Guía", "Empresa", "Especial", "Empresa",
-                "Sede", "Ruta Guía", 0.0, 0.0, 450.0,
-                0.0, 0.0, 450.0, 450.0
-            ))
-            conn.commit()
-            conn.close()
-            st.success(f"✅ Jornada de Instructor acreditada (S/ 450.00) para el {f_hoy}.")
+            dict_inst = {
+                "id_servicio": id_inst,
+                "fecha_hora_viaje": ahora_pe.isoformat(),
+                "fecha_operativa": f_hoy.isoformat(),
+                "semana_operativa": sem_op,
+                "tipo_asignacion": "Instructor / Guía",
+                "tipo_usuario": "Empresa",
+                "categoria_servicio": "Especial",
+                "metodo_pago": "Empresa",
+                "origen": "Sede",
+                "destino": "Ruta Guía",
+                "distancia_km": 0.0,
+                "duracion_min": 0.0,
+                "tarifa_base": 450.0,
+                "monto_recargos": 0.0,
+                "monto_reembolsos": 0.0,
+                "produccion_neta": 450.0,
+                "monto_total": 450.0,
+                "abono_enviado": 0,
+                "fecha_hora_abono": ""
+            }
+            guardar_viaje_remoto(dict_inst)
+            st.success(f"✅ Jornada de Instructor guardada en Google Sheets (S/ 450.00).")
             st.rerun()
 
     with c_esp2:
@@ -450,24 +517,29 @@ with tab2:
             f_hoy = ahora_pe.date()
             sem_op = obtener_semana_operativa(f_hoy)
             id_cds = f"CDS-{f_hoy.strftime('%Y%m%d')}"
-            conn = sqlite3.connect("produccion_viajes.db")
-            c = conn.cursor()
-            c.execute('''
-                INSERT OR REPLACE INTO viajes (
-                    id_servicio, fecha_hora_viaje, fecha_operativa, semana_operativa,
-                    tipo_asignacion, tipo_usuario, categoria_servicio, metodo_pago,
-                    origen, destino, distancia_km, duracion_min, tarifa_base,
-                    monto_recargos, monto_reembolsos, produccion_neta, monto_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                id_cds, ahora_pe.isoformat(), f_hoy.isoformat(), sem_op,
-                "CDS - Costa del Sol", "Empresa", "Especial", "Empresa",
-                "Hotel Costa del Sol", "Aeropuerto / Sede", 0.0, 0.0, 450.0,
-                0.0, 0.0, 450.0, 450.0
-            ))
-            conn.commit()
-            conn.close()
-            st.success(f"✅ Guardia en CDS acreditada (S/ 450.00) para el {f_hoy}.")
+            dict_cds = {
+                "id_servicio": id_cds,
+                "fecha_hora_viaje": ahora_pe.isoformat(),
+                "fecha_operativa": f_hoy.isoformat(),
+                "semana_operativa": sem_op,
+                "tipo_asignacion": "CDS - Costa del Sol",
+                "tipo_usuario": "Empresa",
+                "categoria_servicio": "Especial",
+                "metodo_pago": "Empresa",
+                "origen": "Hotel Costa del Sol",
+                "destino": "Aeropuerto / Sede",
+                "distancia_km": 0.0,
+                "duracion_min": 0.0,
+                "tarifa_base": 450.0,
+                "monto_recargos": 0.0,
+                "monto_reembolsos": 0.0,
+                "produccion_neta": 450.0,
+                "monto_total": 450.0,
+                "abono_enviado": 0,
+                "fecha_hora_abono": ""
+            }
+            guardar_viaje_remoto(dict_cds)
+            st.success(f"✅ Guardia en CDS guardada en Google Sheets (S/ 450.00).")
             st.rerun()
 
     st.divider()
@@ -545,93 +617,88 @@ with tab2:
                 f_op = calcular_fecha_operativa(dt_viaje, tipo_turno, hora_corte)
                 sem_op = obtener_semana_operativa(f_op)
 
-                conn = sqlite3.connect("produccion_viajes.db")
-                c = conn.cursor()
-                try:
-                    c.execute('''
-                        INSERT OR REPLACE INTO viajes (
-                            id_servicio, fecha_hora_viaje, fecha_operativa, semana_operativa,
-                            tipo_asignacion, tipo_usuario, categoria_servicio, metodo_pago,
-                            origen, destino, distancia_km, duracion_min, tarifa_base,
-                            monto_recargos, monto_reembolsos, produccion_neta, monto_total
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        id_servicio, dt_viaje.isoformat(), f_op.isoformat(), sem_op,
-                        tipo_asignacion, "Corporativo", "Lite", metodo_pago,
-                        "", "", 0.0, 0.0, tarifa_base,
-                        recargos, reembolsos, produccion_neta, monto_total
-                    ))
-                    conn.commit()
-                    st.success("Guardado exitosamente.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                finally:
-                    conn.close()
+                datos_guardar = {
+                    "id_servicio": str(id_servicio),
+                    "fecha_hora_viaje": dt_viaje.isoformat(),
+                    "fecha_operativa": str(f_op),
+                    "semana_operativa": sem_op,
+                    "tipo_asignacion": tipo_asignacion,
+                    "tipo_usuario": "Corporativo",
+                    "categoria_servicio": "Lite",
+                    "metodo_pago": metodo_pago,
+                    "origen": "",
+                    "destino": "",
+                    "distancia_km": 0.0,
+                    "duracion_min": 0.0,
+                    "tarifa_base": tarifa_base,
+                    "monto_recargos": recargos,
+                    "monto_reembolsos": reembolsos,
+                    "produccion_neta": produccion_neta,
+                    "monto_total": monto_total,
+                    "abono_enviado": 0,
+                    "fecha_hora_abono": ""
+                }
+                
+                # Guardar remoto en Google Sheets
+                ok = guardar_viaje_remoto(datos_guardar)
+                if ok:
+                    st.success("Guardado en Google Sheets con éxito.")
+                else:
+                    st.warning("Guardado local (sin conexión inmediata con Sheets).")
+                st.rerun()
 
 # --- TAB 3: RENDICIÓN EFECTIVO / YAPE ---
 with tab3:
     st.markdown("#### 💰 Rendición Efectivo / Yape")
-    conn = sqlite3.connect("produccion_viajes.db")
-    df_liq = pd.read_sql_query("""
-        SELECT id_servicio, fecha_hora_viaje, metodo_pago, monto_total, abono_enviado, fecha_hora_abono 
-        FROM viajes 
-        WHERE metodo_pago IN ('Efectivo', 'Yape')
-        ORDER BY fecha_hora_viaje DESC
-    """, conn)
-    conn.close()
+    df_actual = cargar_viajes()
 
-    if not df_liq.empty:
-        pendientes = df_liq[df_liq["abono_enviado"] == 0]
-        st.markdown(f"**Pendiente por rendir:** S/ {pendientes['monto_total'].sum():.2f} ({len(pendientes)} viajes)")
-        st.divider()
+    if not df_actual.empty and "metodo_pago" in df_actual.columns:
+        df_liq = df_actual[df_actual["metodo_pago"].isin(["Efectivo", "Yape"])].copy()
+        df_liq["monto_total"] = pd.to_numeric(df_liq["monto_total"], errors="coerce").fillna(0.0)
+        df_liq["abono_enviado"] = pd.to_numeric(df_liq["abono_enviado"], errors="coerce").fillna(0).astype(int)
 
-        for _, row in df_liq.iterrows():
-            id_serv = row["id_servicio"]
-            formato_envio = f"{id_serv} - 2986"
-            esta_enviado = bool(row["abono_enviado"])
+        if not df_liq.empty:
+            pendientes = df_liq[df_liq["abono_enviado"] == 0]
+            st.markdown(f"**Pendiente por rendir:** S/ {pendientes['monto_total'].sum():.2f} ({len(pendientes)} viajes)")
+            st.divider()
 
-            c1, c2 = st.columns([3, 2])
-            with c1:
-                st.code(formato_envio, language=None)
-                st.caption(f"**S/ {row['monto_total']:.2f}** ({row['metodo_pago']})")
-                if esta_enviado:
-                    st.success(f"Enviado: {row['fecha_hora_abono']}")
-            with c2:
-                if not esta_enviado:
-                    if st.button("Marcar Enviado", key=f"env_{id_serv}"):
-                        ahora_str = ahora_pe.strftime("%d/%m/%y %H:%M")
-                        conn = sqlite3.connect("produccion_viajes.db")
-                        cur = conn.cursor()
-                        cur.execute("UPDATE viajes SET abono_enviado = 1, fecha_hora_abono = ? WHERE id_servicio = ?", (ahora_str, id_serv))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
-                else:
-                    if st.button("Desmarcar", key=f"des_{id_serv}"):
-                        conn = sqlite3.connect("produccion_viajes.db")
-                        cur = conn.cursor()
-                        cur.execute("UPDATE viajes SET abono_enviado = 0, fecha_hora_abono = NULL WHERE id_servicio = ?", (id_serv,))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
+            for _, row in df_liq.iterrows():
+                id_serv = str(row["id_servicio"])
+                formato_envio = f"{id_serv} - 2986"
+                esta_enviado = bool(row["abono_enviado"])
+
+                c1, c2 = st.columns([3, 2])
+                with c1:
+                    st.code(formato_envio, language=None)
+                    st.caption(f"**S/ {row['monto_total']:.2f}** ({row['metodo_pago']})")
+                    if esta_enviado:
+                        st.success(f"Enviado: {row.get('fecha_hora_abono', '')}")
+                with c2:
+                    if not esta_enviado:
+                        if st.button("Marcar Enviado", key=f"env_{id_serv}"):
+                            ahora_str = ahora_pe.strftime("%d/%m/%y %H:%M")
+                            actualizar_abono_remoto(id_serv, 1, ahora_str)
+                            st.rerun()
+                    else:
+                        if st.button("Desmarcar", key=f"des_{id_serv}"):
+                            actualizar_abono_remoto(id_serv, 0, "")
+                            st.rerun()
+        else:
+            st.info("No hay viajes en Efectivo o Yape.")
     else:
-        st.info("No hay viajes en Efectivo o Yape.")
+        st.info("No hay viajes registrados.")
 
-# --- TAB 4: HISTORIAL, RESPALDO Y RESTAURACIÓN ---
+# --- TAB 4: HISTORIAL Y SINCRONIZACIÓN ---
 with tab4:
-    st.markdown("#### 🔄 Restaurar o Respaldar Semana")
+    st.markdown("#### 🔄 Sincronización y Respaldo")
     
-    # MÓDULO DE RESTAURACIÓN DE CSV
-    with st.expander("📤 Restaurar datos desde Respaldo CSV", expanded=False):
+    with st.expander("📤 Migrar / Restaurar datos a Google Sheets desde CSV", expanded=False):
         csv_subido = st.file_uploader("Selecciona tu archivo .csv guardado", type=["csv"], key="uploader_backup")
         if csv_subido is not None:
-            if st.button("⚡ Cargar y Restaurar Datos", use_container_width=True):
+            if st.button("⚡ Subir y Sincronizar en Google Sheets", use_container_width=True):
                 try:
                     df_res = pd.read_csv(csv_subido)
-                    conn = sqlite3.connect("produccion_viajes.db")
-                    c = conn.cursor()
                     
-                    # Si es el archivo de detalle diario exportado
                     if "fecha_operativa" in df_res.columns and "produccion" in df_res.columns:
                         for _, r in df_res.iterrows():
                             f_op_str = str(r["fecha_operativa"])
@@ -639,73 +706,54 @@ with tab4:
                             sem_op_str = obtener_semana_operativa(f_op_dt)
                             prod_val = float(r["produccion"])
                             id_rest = f"REC-{f_op_str.replace('-', '')}"
-                            c.execute('''
-                                INSERT OR REPLACE INTO viajes (
-                                    id_servicio, fecha_hora_viaje, fecha_operativa, semana_operativa,
-                                    tipo_asignacion, tipo_usuario, categoria_servicio, metodo_pago,
-                                    origen, destino, distancia_km, duracion_min, tarifa_base,
-                                    monto_recargos, monto_reembolsos, produccion_neta, monto_total
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ''', (
-                                id_rest, f"{f_op_str}T20:00:00", f_op_str, sem_op_str,
-                                "Directo", "Empresa", "Resumen", "Empresa",
-                                "Ruta", "Destino", 0.0, 0.0, prod_val,
-                                0.0, 0.0, prod_val, prod_val
-                            ))
-                    # Si es el archivo con el detalle viaje por viaje
+                            dict_item = {
+                                "id_servicio": id_rest,
+                                "fecha_hora_viaje": f"{f_op_str}T20:00:00",
+                                "fecha_operativa": f_op_str,
+                                "semana_operativa": sem_op_str,
+                                "tipo_asignacion": "Directo",
+                                "tipo_usuario": "Empresa",
+                                "categoria_servicio": "Resumen",
+                                "metodo_pago": "Empresa",
+                                "origen": "Ruta",
+                                "destino": "Destino",
+                                "distancia_km": 0.0,
+                                "duracion_min": 0.0,
+                                "tarifa_base": prod_val,
+                                "monto_recargos": 0.0,
+                                "monto_reembolsos": 0.0,
+                                "produccion_neta": prod_val,
+                                "monto_total": prod_val,
+                                "abono_enviado": 0,
+                                "fecha_hora_abono": ""
+                            }
+                            guardar_viaje_remoto(dict_item)
                     elif "id_servicio" in df_res.columns:
                         for _, r in df_res.iterrows():
-                            c.execute('''
-                                INSERT OR REPLACE INTO viajes (
-                                    id_servicio, fecha_hora_viaje, fecha_operativa, semana_operativa,
-                                    tipo_asignacion, tipo_usuario, categoria_servicio, metodo_pago,
-                                    origen, destino, distancia_km, duracion_min, tarifa_base,
-                                    monto_recargos, monto_reembolsos, produccion_neta, monto_total
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ''', (
-                                str(r["id_servicio"]), str(r.get("fecha_hora_viaje", "")), str(r["fecha_operativa"]), str(r["semana_operativa"]),
-                                str(r.get("tipo_asignacion", "Directo")), "Empresa", "Lite", str(r.get("metodo_pago", "Empresa")),
-                                "", "", 0.0, 0.0, float(r.get("produccion_neta", 0.0)),
-                                0.0, float(r.get("monto_reembolsos", 0.0)), float(r.get("produccion_neta", 0.0)), float(r.get("monto_total", 0.0))
-                            ))
-                    conn.commit()
-                    conn.close()
-                    st.success("¡Datos restaurados con éxito! Revisa la pestaña '📊 Guardia & Metas'.")
+                            dict_item = r.to_dict()
+                            guardar_viaje_remoto(dict_item)
+                    st.success("¡Datos sincronizados directamente en tu Google Sheets!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error al restaurar: {e}")
+                    st.error(f"Error al sincronizar: {e}")
 
-    conn = sqlite3.connect("produccion_viajes.db")
-    df_all = pd.read_sql_query("""
-        SELECT 
-            id_servicio,
-            semana_operativa,
-            fecha_operativa,
-            tipo_asignacion,
-            metodo_pago,
-            produccion_neta,
-            monto_reembolsos,
-            monto_total
-        FROM viajes 
-        ORDER BY fecha_hora_viaje DESC
-    """, conn)
-    conn.close()
+    df_all = cargar_viajes()
 
-    if not df_all.empty:
+    if not df_all.empty and "id_servicio" in df_all.columns:
         csv_data = df_all.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Descargar Respaldo de Seguridad (CSV)",
+            label="📥 Descargar Copia Local de Seguridad (CSV)",
             data=csv_data,
             file_name=f"respaldo_viajes_{ahora_pe.strftime('%Y%m%d')}.csv",
             mime="text/csv",
             use_container_width=True
         )
 
-        st.markdown("#### 📋 Historial de Servicios")
-        semanas_lista = sorted(df_all["semana_operativa"].unique().tolist(), reverse=True)
-        semana_actual = semanas_lista[0]
+        st.markdown("#### 📋 Historial en Google Sheets")
+        semanas_lista = sorted([str(s) for s in df_all["semana_operativa"].dropna().unique().tolist()], reverse=True)
+        semana_actual = semanas_lista[0] if semanas_lista else ""
         
-        opciones_filtro = [f"Esta semana ({semana_actual})"]
+        opciones_filtro = [f"Esta semana ({semana_actual})"] if semana_actual else []
         if len(semanas_lista) > 1:
             opciones_filtro.append(f"Semana anterior ({semanas_lista[1]})")
         opciones_filtro.append("Ver todos los servicios")
@@ -719,19 +767,15 @@ with tab4:
         else:
             df_mostrar = df_all
 
-        st.caption(f"Mostrando {len(df_mostrar)} registros.")
+        st.caption(f"Mostrando {len(df_mostrar)} registros sincronizados.")
         st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
 
         st.divider()
-        lista_ids = df_mostrar["id_servicio"].tolist()
-        id_borrar = st.selectbox("Eliminar servicio o jornada:", lista_ids)
+        lista_ids = [str(x) for x in df_mostrar["id_servicio"].tolist()]
+        id_borrar = st.selectbox("Eliminar servicio de la nube:", lista_ids)
         if st.button("❌ Confirmar Eliminación"):
-            conn = sqlite3.connect("produccion_viajes.db")
-            c = conn.cursor()
-            c.execute("DELETE FROM viajes WHERE id_servicio = ?", (id_borrar,))
-            conn.commit()
-            conn.close()
-            st.success("Registro eliminado.")
+            eliminar_viaje_remoto(id_borrar)
+            st.success("Registro eliminado de Google Sheets.")
             st.rerun()
     else:
-        st.info("Sin registros en la tabla.")
+        st.info("No hay registros en la nube.")
