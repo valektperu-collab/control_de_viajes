@@ -114,10 +114,17 @@ def get_preasignados():
         "pre3_monto": 0.0, "pre3_estado": "Pendiente"
     }
 
+# Reset automático a 'Pendiente' cuando se ingresa un monto nuevo mayor a 0
 def update_preasignado_monto(p1, p2, p3):
     conn = sqlite3.connect("produccion_viajes.db")
     c = conn.cursor()
-    c.execute("UPDATE config_preasignados SET pre1_monto = ?, pre2_monto = ?, pre3_monto = ? WHERE id = 1", (p1, p2, p3))
+    c.execute("""
+        UPDATE config_preasignados 
+        SET pre1_monto = ?, pre1_estado = CASE WHEN ? > 0 THEN 'Pendiente' ELSE pre1_estado END,
+            pre2_monto = ?, pre2_estado = CASE WHEN ? > 0 THEN 'Pendiente' ELSE pre2_estado END,
+            pre3_monto = ?, pre3_estado = CASE WHEN ? > 0 THEN 'Pendiente' ELSE pre3_estado END
+        WHERE id = 1
+    """, (p1, p1, p2, p2, p3, p3))
     conn.commit()
     conn.close()
 
@@ -128,7 +135,7 @@ def update_preasignado_estado(campo_estado, nuevo_estado):
     conn.commit()
     conn.close()
 
-# --- HORA PERÚ (UTC-5) ---
+# --- HORA OFICIAL PERÚ (UTC-5) ---
 def obtener_ahora_peru():
     return datetime.utcnow() - timedelta(hours=5)
 
@@ -147,7 +154,7 @@ def optimizar_imagen(img_pil):
     buffer.seek(0)
     return Image.open(buffer)
 
-# --- PROCESAMIENTO CON IA ---
+# --- PROCESAMIENTO CON IA CON REINTENTO AUTOMÁTICO ---
 def procesar_capturas(imagenes):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
@@ -163,7 +170,7 @@ def procesar_capturas(imagenes):
         "id_servicio": "ID o número",
         "anio": 2026,
         "mes": 10,
-        "dia": 21,
+        "dia": 23,
         "hora": 23,
         "minuto": 20,
         "monto_total": 0.0,
@@ -182,25 +189,25 @@ def procesar_capturas(imagenes):
     - metodo_pago: Empresa, Efectivo, Yape o Tarjeta.
     """
 
-    # Modelo oficial vigente
     modelos = ["gemini-3.8-flash"]
     ultimo_error = None
 
     for m in modelos:
-        try:
-            contents = imagenes_ligeras + [prompt]
-            response = client.models.generate_content(model=m, contents=contents)
-            raw = response.text.strip()
-            if "```json" in raw:
-                raw = raw.split("```json")[1].split("```")[0]
-            elif "```" in raw:
-                raw = raw.split("```")[1].split("```")[0]
-            return json.loads(raw.strip())
-        except Exception as e:
-            ultimo_error = e
-            continue
+        for intento in range(2):
+            try:
+                contents = imagenes_ligeras + [prompt]
+                response = client.models.generate_content(model=m, contents=contents)
+                raw = response.text.strip()
+                if "```json" in raw:
+                    raw = raw.split("```json")[1].split("```")[0]
+                elif "```" in raw:
+                    raw = raw.split("```")[1].split("```")[0]
+                return json.loads(raw.strip())
+            except Exception as e:
+                ultimo_error = e
+                continue
 
-    raise Exception(f"Error de lectura: {ultimo_error}")
+    raise Exception(f"Servidor temporalmente ocupado. Pulsa nuevamente '⚡ Extraer Rápido': {ultimo_error}")
 
 def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
     if tipo_turno == "Nocturno" and dt.hour < hora_corte:
@@ -259,72 +266,100 @@ with tab1:
         dias_trabajados = len(resumen_diario)
         
         meta_semanal_100 = regimen * 450.0
-        falta_semanal_db = max(0.0, meta_semanal_100 - prod_acumulada_db)
         
+        # Preasignados que siguen activos (Pendiente)
         preasig_activos = sum([
             pre_data[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
             if pre_data[f"{p}_estado"] == "Pendiente"
         ])
 
+        # Totales proyectados
         total_guardia_proy = prod_hoy + preasig_activos
         acumulado_con_proyeccion = prod_acumulada_db + preasig_activos
         falta_semanal_proyectada = max(0.0, meta_semanal_100 - acumulado_con_proyeccion)
 
+        # Evaluación de pisos históricos ya cerrados (condición eliminatoria estricta)
         dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != ultimo_dia]
         alguna_falla_piso_cerrada = (dias_cerrados["produccion"] < 300.0).any() if not dias_cerrados.empty else False
 
+        # Piso de hoy
         falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
         piso_hoy_ok = (falta_piso_hoy == 0)
 
+        # Meta nominal diaria (450)
         falta_meta_hoy = max(0.0, 450.0 - total_guardia_proy)
         superavit_hoy = max(0.0, total_guardia_proy - 450.0)
 
-        dias_futuros = max(0, regimen - dias_trabajados)
-        promedio_futuro = (falta_semanal_proyectada / dias_futuros) if dias_futuros > 0 else 0.0
+        # Ritmo acumulado teórico
+        ritmo_esperado_acumulado = dias_trabajados * 450.0
+        superavit_acumulado_global = acumulado_con_proyeccion - ritmo_esperado_acumulado
 
-        # HORA EXACTA LIMA
+        dias_futuros = max(0, regimen - dias_trabajados)
+
+        # BLINDAJE DE PISO: La meta de los siguientes días nunca puede ser inferior al piso eliminatorio de S/ 300
+        if dias_futuros > 0:
+            promedio_matematico = falta_semanal_proyectada / dias_futuros
+            meta_real_proximos_dias = max(300.0, promedio_matematico)
+        else:
+            meta_real_proximos_dias = 0.0
+
         hora_pe = ahora_pe.hour
 
+        # DECISIÓN DEL SEMÁFORO Y MENSAJES TÁCTICOS
         if alguna_falla_piso_cerrada:
             clase_card = "hero-card-rojo"
             badge_estado = "🔴 BONO ANULADO (Falla en Piso Diario)"
-            alerta_msg = "🚫 Un día anterior cerró con menos de S/ 300. La empresa no liquidará bono semanal por incumplimiento de piso."
+            alerta_msg = "🚫 Un día anterior cerró con menos de S/ 300. La empresa anuló el bono de S/ 100 por incumplimiento de piso diario."
         elif not piso_hoy_ok:
             clase_card = "hero-card-ambar"
             badge_estado = f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
             if hora_pe >= 1 and hora_pe < 5:
-                alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para los S/ 300 obligatorios de hoy (contando preasignados). ¡No cierres sin asegurar el piso!"
+                alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para asegurar los S/ 300 obligatorios de hoy. ¡No cierres turno sin cumplir el piso o pierdes el bono de toda la semana!"
             else:
                 alerta_msg = f"⚠️ Meta obligatoria inmediata: asegurar el piso de S/ 300. Te faltan S/ {falta_piso_hoy:.2f} antes de cerrar guardia."
         else:
-            if falta_semanal_proyectada <= 50.0 and falta_semanal_proyectada > 0:
+            # Piso de hoy asegurado
+            if falta_semanal_proyectada == 0:
                 clase_card = "hero-card-verde"
-                badge_estado = "🟢 CIERRE DE SEMANA CERCA"
-                alerta_msg = f"🎯 Proyectas quedar a solo S/ {falta_semanal_proyectada:.2f} de los S/ 2,250. Recuerda que para cobrar el bono debes cumplir siempre el piso de S/ 300 de cada día trabajado."
-            elif total_guardia_proy >= 450.0:
+                badge_estado = "🏆 VOLUMEN SEMANAL LOGRADO"
+                if dias_futuros > 0:
+                    alerta_msg = f"🏆 ¡Superaste los S/ {meta_semanal_100:.0f}! En tus {dias_futuros} día(s) restantes tu única meta obligatoria será cumplir el piso de S/ 300.00 por día trabajado para cobrar el bono."
+                else:
+                    alerta_msg = "🏆 ¡Misión semanal completada! Volumen y pisos asegurados. Bono de S/ 100 ganado."
+            elif falta_semanal_proyectada < 300.0 and dias_futuros > 0:
+                clase_card = "hero-card-verde"
+                badge_estado = "🟢 META CASI CERRADA"
+                alerta_msg = (
+                    f"🔥 Para la meta semanal solo faltan S/ {falta_semanal_proyectada:.2f}, pero tu meta OBLIGATORIA para los siguientes "
+                    f"{dias_futuros} día(s) será cumplir el piso de S/ 300.00 por guardia para no anular el bono ante la empresa."
+                )
+            elif superavit_acumulado_global >= 0:
                 clase_card = "hero-card-verde"
                 badge_estado = "🟢 RITMO GANADOR"
                 if dias_futuros > 0:
-                    alerta_msg = f"🔥 ¡Meta de hoy asegurada (+S/ {superavit_hoy:.2f})! Con tus preasignados, tu promedio para los siguientes {dias_futuros} día(s) bajó a solo S/ {promedio_futuro:.2f}/día. Si pasó la 1:00 AM, evalúa descansar."
+                    alerta_msg = (
+                        f"🔥 ¡Superávit global de +S/ {superavit_acumulado_global:.2f}! Tu piso de hoy está asegurado. "
+                        f"Tu meta requerida para tus siguientes {dias_futuros} día(s) es de S/ {meta_real_proximos_dias:.2f}/día. Si pasó la 1:00 AM, evalúa descansar."
+                    )
                 else:
-                    alerta_msg = "🏆 ¡Misión semanal completada! Bono de S/ 100 asegurado."
+                    alerta_msg = "🏆 ¡Semana defendida con éxito! Bono listo."
             else:
                 clase_card = "hero-card-verde" if preasig_activos > 0 else "hero-card-ambar"
-                badge_estado = "🟢 PISO OK | CERCA DE META"
+                badge_estado = "🟢 PISO OK | DEFENDIENDO PROMEDIO"
                 if hora_pe >= 1 and hora_pe < 5:
                     alerta_msg = (
-                        f"🌙 Piso asegurado (proyectas S/ {total_guardia_proy:.2f}). Te faltan solo S/ {falta_meta_hoy:.2f} para los S/ 450. "
-                        f"Como pasó la 1:00 AM, si guardas auto tu promedio para los siguientes {dias_futuros} día(s) queda en S/ {promedio_futuro:.2f}/día."
+                        f"🌙 Piso asegurado (proyectas S/ {total_guardia_proy:.2f}). Pasó la 1:00 AM y el flujo en aeropuerto es bajo. "
+                        f"Si guardas ahora, tu meta para los siguientes {dias_futuros} día(s) queda en S/ {meta_real_proximos_dias:.2f}/día."
                     )
                 else:
                     alerta_msg = (
-                        f"💡 Piso asegurado. Hoy proyectas S/ {total_guardia_proy:.2f} (hecho + preasig); te faltan solo **S/ {falta_meta_hoy:.2f}** para cerrar en S/ 450. "
-                        f"Tienes buen flujo antes de la 1:00 AM. Cumpliendo esto, tus siguientes {dias_futuros} día(s) quedan en S/ {promedio_futuro:.2f}/día."
+                        f"💡 Piso asegurado (proyectas S/ {total_guardia_proy:.2f}). Te faltan S/ {falta_meta_hoy:.2f} para los S/ 450 de hoy. "
+                        f"Aprovecha el flujo antes de la 1:00 AM. Tu meta para los siguientes {dias_futuros} día(s) es de S/ {meta_real_proximos_dias:.2f}/día."
                     )
 
         pct_semana = min(100.0, (acumulado_con_proyeccion / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
 
-        # HERO CARD
+        # RENDER HERO CARD
         st.markdown(f"""
         <div class="hero-card {clase_card}">
             <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {badge_estado}</div>
@@ -333,8 +368,8 @@ with tab1:
             <hr style="margin: 6px 0; border-color: rgba(255,255,255,0.2);">
             <div style="font-size:0.88rem; margin-top:4px;">
                 <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig:</strong> S/ {preasig_activos:.2f} &nbsp;|&nbsp; <strong>Total Proyectado:</strong> S/ {total_guardia_proy:.2f}<br>
-                <strong>Meta de Hoy (450):</strong> {"¡Cumplida!" if falta_meta_hoy == 0 else f"<span style='color:#fca5a5;'>Faltan S/ {falta_meta_hoy:.2f}</span>"} &nbsp;|&nbsp;
-                <strong>Promedio Siguientes Días:</strong> S/ {promedio_futuro:.2f}/día
+                <strong>Piso Hoy:</strong> {"✅ ASEGURADO" if piso_hoy_ok else f"<span style='color:#fca5a5;'>Faltan S/ {falta_piso_hoy:.2f}</span>"} &nbsp;|&nbsp;
+                <strong>Meta Restante:</strong> S/ {meta_real_proximos_dias:.2f}/día
             </div>
             <div class="hero-alert">{alerta_msg}</div>
         </div>
@@ -450,7 +485,7 @@ with tab2:
                 try:
                     datos = procesar_capturas(imgs)
                     try:
-                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 21)))
+                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 23)))
                         h_dt = time(int(datos.get("hora", 0)), int(datos.get("minuto", 0)))
                     except Exception:
                         f_dt = ahora_pe.date()
@@ -586,7 +621,7 @@ with tab3:
     else:
         st.info("No hay viajes en Efectivo o Yape.")
 
-# --- TAB 4: HISTORIAL CON FILTRO SEMANAL ---
+# --- TAB 4: HISTORIAL Y RESPALDO ANTIPÉRDIDA ---
 with tab4:
     st.markdown("#### 📋 Historial de Servicios")
     conn = sqlite3.connect("produccion_viajes.db")
@@ -606,6 +641,16 @@ with tab4:
     conn.close()
 
     if not df_all.empty:
+        # BOTÓN DE RESPALDO DE SEGURIDAD
+        csv_data = df_all.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Descargar Respaldo de Seguridad (CSV)",
+            data=csv_data,
+            file_name=f"respaldo_viajes_{ahora_pe.strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
         semanas_lista = sorted(df_all["semana_operativa"].unique().tolist(), reverse=True)
         semana_actual = semanas_lista[0]
         
