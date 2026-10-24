@@ -59,7 +59,7 @@ GSHEETS_URL = "https://script.google.com/macros/s/AKfycbzbnRBVGJC3AhvoM1gbE7V1p6
 # --- FUNCIONES DE SINCRONIZACIÓN GOOGLE SHEETS ---
 def obtener_viajes_remotos():
     try:
-        r = requests.get(GSHEETS_URL, timeout=12)
+        r = requests.get(GSHEETS_URL, timeout=20)
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, list) and len(data) > 0:
