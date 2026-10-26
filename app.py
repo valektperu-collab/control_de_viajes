@@ -4,7 +4,6 @@ import requests
 import json
 import os
 from datetime import datetime, date, timedelta
-import pytz
 from PIL import Image
 import google.generativeai as genai
 
@@ -17,12 +16,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+from datetime import timezone
 
-# Zona horaria oficial Lima (UTC-5)
-TZ_LIMA = pytz.timezone("America/Lima")
+# UTC-5 fijo para Lima
+TZ_LIMA = timezone(timedelta(hours=-5))
 
 def obtener_ahora():
     return datetime.now(TZ_LIMA)
+    
 
 # ==============================================================================
 # SECRETOS Y CONSTANTES
