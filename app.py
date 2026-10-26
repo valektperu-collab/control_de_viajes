@@ -127,7 +127,10 @@ def extraer_datos_con_ia(imagen_file):
         return None
     try:
         img = Image.open(imagen_file)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        # Modelo oficial Gemini 3.8 Flash
+        model = genai.GenerativeModel("gemini-3.8-flash")
+        
         prompt = """
         Eres un asistente experto analizando tickets y capturas de viajes de taxi corporativo y aplicativos.
         Extrae los siguientes datos con máxima precisión y responde estrictamente en formato JSON válido:
@@ -153,7 +156,7 @@ def extraer_datos_con_ia(imagen_file):
     except Exception as e:
         st.error(f"Error procesando imagen: {e}")
         return None
-
+        
 # ==============================================================================
 # ESTADO DE SESIÓN
 # ==============================================================================
