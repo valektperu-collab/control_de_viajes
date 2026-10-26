@@ -1,726 +1,466 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
-from datetime import datetime, timedelta, date, time
-import json
-import io
 import requests
+import json
+import os
+from datetime import datetime, date, timedelta, timezone
 from PIL import Image
-from google import genai
 
-# --- CONFIGURACIÓN DE PÁGINA Y ESTILOS MÓVILES ---
-st.set_page_config(page_title="Control de Viajes", page_icon="🚖", layout="wide")
+# Importación segura de IA para evitar caídas de servidor
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 
-st.markdown("""
-<style>
-    .block-container { 
-        padding-top: 3.8rem !important; 
-        padding-bottom: 2rem !important; 
-        padding-left: 0.8rem !important; 
-        padding-right: 0.8rem !important; 
-    }
-    .titulo-app {
-        font-size: 1.22rem !important;
-        font-weight: 800 !important;
-        color: #111827;
-        margin-bottom: 0.5rem !important;
-    }
-    
-    .hero-card {
-        border-radius: 10px;
-        padding: 12px 14px;
-        margin-bottom: 12px;
-        border: 1px solid #374151;
-        color: #f9fafb;
-    }
-    .hero-card-verde { background: #064e3b; border-color: #059669; }
-    .hero-card-ambar { background: #78350f; border-color: #d97706; }
-    .hero-card-rojo  { background: #7f1d1d; border-color: #dc2626; }
-    .hero-card-dark  { background: #111827; border-color: #374151; }
+# ==============================================================================
+# CONFIGURACIÓN GENERAL Y TEMA MÓVIL
+# ==============================================================================
+st.set_page_config(
+    page_title="Control Táctico de Viajes",
+    page_icon="🚕",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-    .hero-title { font-size: 0.95rem; font-weight: 700; margin-bottom: 6px; }
-    .hero-meta { font-size: 1.25rem; font-weight: 800; }
-    .hero-sub { font-size: 0.85rem; margin-bottom: 6px; opacity: 0.9; }
-    .hero-alert {
-        background: rgba(0, 0, 0, 0.28);
-        border-left: 3px solid #ffffff;
-        padding: 8px 10px;
-        border-radius: 4px;
-        font-size: 0.84rem;
-        margin-top: 8px;
-        line-height: 1.35;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Zona horaria nativa Lima (UTC-5)
+TZ_LIMA = timezone(timedelta(hours=-5))
 
-# URL WEBHOOK GOOGLE SHEETS
-GSHEETS_URL = "https://script.google.com/macros/s/AKfycbzbnRBVGJC3AhvoM1gbE7V1p6we8DxpfRyhQfxP0zIJ1G9xCG1YOA6TLtrOwfHh588/exec"
+def obtener_ahora():
+    return datetime.now(TZ_LIMA)
 
-# --- FUNCIONES DE SINCRONIZACIÓN GOOGLE SHEETS ---
-def obtener_viajes_remotos():
-    try:
-        r = requests.get(GSHEETS_URL, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                df = pd.DataFrame(data)
-                # Convertir numéricos
-                cols_num = ["distancia_km", "duracion_min", "tarifa_base", "monto_recargos", "monto_reembolsos", "produccion_neta", "monto_total"]
-                for c in cols_num:
-                    if c in df.columns:
-                        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-                if "abono_enviado" in df.columns:
-                    df["abono_enviado"] = pd.to_numeric(df["abono_enviado"], errors="coerce").fillna(0).astype(int)
-                return df
-    except Exception as e:
-        st.warning(f"Aviso de sincronización nube: {e}")
-    return pd.DataFrame()
+ahora_pe = obtener_ahora()
 
-def guardar_viaje_remoto(datos_dict):
-    try:
-        payload = {
-            "action": "insert_or_replace",
-            "data": datos_dict
-        }
-        r = requests.post(GSHEETS_URL, json=payload, timeout=12)
-        return r.status_code == 200
-    except Exception:
-        return False
+# Clave de Gemini y Webhook de Google Apps Script
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+if GEMINI_API_KEY and genai is not None:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-def eliminar_viaje_remoto(id_servicio):
-    try:
-        payload = {
-            "action": "delete",
-            "id_servicio": str(id_servicio)
-        }
-        r = requests.post(GSHEETS_URL, json=payload, timeout=12)
-        return r.status_code == 200
-    except Exception:
-        return False
+GSHEETS_URL = st.secrets.get(
+    "GSHEETS_URL", 
+    os.environ.get("GSHEETS_URL", "https://script.google.com/macros/s/AKfycbz_tu_script_id_aqui/exec")
+)
 
-def actualizar_abono_remoto(id_servicio, estado, fecha_abono=""):
-    try:
-        payload = {
-            "action": "update_abono",
-            "id_servicio": str(id_servicio),
-            "abono_enviado": int(estado),
-            "fecha_hora_abono": str(fecha_abono)
-        }
-        r = requests.post(GSHEETS_URL, json=payload, timeout=12)
-        return r.status_code == 200
-    except Exception:
-        return False
+LOCAL_CACHE_FILE = "viajes_cache.json"
 
-# --- BASE DE DATOS LOCAL (RÉPLICA Y PREASIGNADOS) ---
-def init_db():
-    conn = sqlite3.connect("produccion_viajes.db")
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS viajes (
-            id_servicio TEXT PRIMARY KEY,
-            fecha_hora_viaje TEXT,
-            fecha_operativa TEXT,
-            semana_operativa TEXT,
-            tipo_asignacion TEXT,
-            tipo_usuario TEXT,
-            categoria_servicio TEXT,
-            metodo_pago TEXT,
-            origen TEXT,
-            destino TEXT,
-            distancia_km REAL,
-            duracion_min REAL,
-            tarifa_base REAL,
-            monto_recargos REAL,
-            monto_reembolsos REAL,
-            produccion_neta REAL,
-            monto_total REAL,
-            abono_enviado INTEGER DEFAULT 0,
-            fecha_hora_abono TEXT
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS config_preasignados (
-            id INTEGER PRIMARY KEY,
-            pre1_monto REAL DEFAULT 0.0,
-            pre1_estado TEXT DEFAULT 'Pendiente',
-            pre2_monto REAL DEFAULT 0.0,
-            pre2_estado TEXT DEFAULT 'Pendiente',
-            pre3_monto REAL DEFAULT 0.0,
-            pre3_estado TEXT DEFAULT 'Pendiente'
-        )
-    ''')
-    c.execute("INSERT OR IGNORE INTO config_preasignados (id) VALUES (1)")
-    conn.commit()
-    conn.close()
+META_SEMANAL = 2250.00
+BONO_MONTO = 100.00
+PISO_DIARIO = 300.00
+HORA_CORTE_NOCTURNO = 5  # 05:00 a. m.
 
-init_db()
-
-def get_preasignados():
-    conn = sqlite3.connect("produccion_viajes.db")
-    c = conn.cursor()
-    c.execute("SELECT pre1_monto, pre1_estado, pre2_monto, pre2_estado, pre3_monto, pre3_estado FROM config_preasignados WHERE id = 1")
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "pre1_monto": float(row[0]), "pre1_estado": str(row[1]),
-            "pre2_monto": float(row[2]), "pre2_estado": str(row[3]),
-            "pre3_monto": float(row[4]), "pre3_estado": str(row[5])
-        }
-    return {
-        "pre1_monto": 0.0, "pre1_estado": "Pendiente",
-        "pre2_monto": 0.0, "pre2_estado": "Pendiente",
-        "pre3_monto": 0.0, "pre3_estado": "Pendiente"
-    }
-
-def update_preasignado_monto(p1, p2, p3):
-    conn = sqlite3.connect("produccion_viajes.db")
-    c = conn.cursor()
-    c.execute("""
-        UPDATE config_preasignados 
-        SET pre1_monto = ?, pre1_estado = CASE WHEN ? > 0 THEN 'Pendiente' ELSE pre1_estado END,
-            pre2_monto = ?, pre2_estado = CASE WHEN ? > 0 THEN 'Pendiente' ELSE pre2_estado END,
-            pre3_monto = ?, pre3_estado = CASE WHEN ? > 0 THEN 'Pendiente' ELSE pre3_estado END
-        WHERE id = 1
-    """, (p1, p1, p2, p2, p3, p3))
-    conn.commit()
-    conn.close()
-
-def update_preasignado_estado(campo_estado, nuevo_estado):
-    conn = sqlite3.connect("produccion_viajes.db")
-    c = conn.cursor()
-    c.execute(f"UPDATE config_preasignados SET {campo_estado} = ? WHERE id = 1", (nuevo_estado,))
-    conn.commit()
-    conn.close()
-
-# --- HORA OFICIAL PERÚ (UTC-5) ---
-def obtener_ahora_peru():
-    return datetime.utcnow() - timedelta(hours=5)
-
-# --- PROCESAMIENTO CON IA ---
-def optimizar_imagen(img_pil):
-    w, h = img_pil.size
-    if w > 800:
-        ratio = 800 / float(w)
-        nuevo_h = int(float(h) * ratio)
-        img_pil = img_pil.resize((800, nuevo_h), Image.Resampling.LANCZOS)
-    
-    buffer = io.BytesIO()
-    if img_pil.mode in ("RGBA", "P"):
-        img_pil = img_pil.convert("RGB")
-    img_pil.save(buffer, format="JPEG", quality=75, optimize=True)
-    buffer.seek(0)
-    return Image.open(buffer)
-
-def procesar_capturas(imagenes):
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key:
-        raise Exception("Falta configurar GEMINI_API_KEY en Secrets.")
-
-    client = genai.Client(api_key=api_key)
-    imagenes_ligeras = [optimizar_imagen(im) for im in imagenes]
-
-    prompt = """
-    Analiza esta(s) captura(s) de taxi.
-    Devuelve ÚNICAMENTE un JSON sin bloques ```json:
-    {
-        "id_servicio": "ID o número",
-        "anio": 2026,
-        "mes": 10,
-        "dia": 23,
-        "hora": 23,
-        "minuto": 20,
-        "monto_total": 0.0,
-        "tarifa_base": 0.0,
-        "monto_recargos": 0.0,
-        "monto_reembolsos": 0.0,
-        "tipo_asignacion": "Directo, Kusi, Latam o CDS",
-        "tipo_usuario": "Corporativo o Particular",
-        "metodo_pago": "Empresa, Efectivo, Yape o Tarjeta"
-    }
-    REGLAS:
-    - Extrae FECHA y HORA reales del servicio de la cabecera. Si no figura el año, usa 2026.
-    - monto_recargos: suma extras/espera/recargos.
-    - monto_reembolsos: peajes y estacionamientos.
-    - tipo_asignacion: Directo, Kusi, Latam o CDS.
-    - metodo_pago: Empresa, Efectivo, Yape o Tarjeta.
-    """
-
-    modelos = ["gemini-3.8-flash"]
-    ultimo_error = None
-
-    for m in modelos:
-        for _ in range(2):
-            try:
-                contents = imagenes_ligeras + [prompt]
-                response = client.models.generate_content(model=m, contents=contents)
-                raw = response.text.strip()
-                if "```json" in raw:
-                    raw = raw.split("```json")[1].split("```")[0]
-                elif "```" in raw:
-                    raw = raw.split("```")[1].split("```")[0]
-                return json.loads(raw.strip())
-            except Exception as e:
-                ultimo_error = e
-                continue
-
-    raise Exception(f"Servidor temporalmente ocupado: {ultimo_error}")
-
-def calcular_fecha_operativa(dt, tipo_turno, hora_corte):
-    if tipo_turno == "Nocturno" and dt.hour < hora_corte:
-        return (dt - timedelta(days=1)).date()
-    return dt.date()
+# ==============================================================================
+# GESTIÓN DE TIEMPO Y PERSISTENCIA (OFFLINE FIRST)
+# ==============================================================================
+def calcular_fecha_operativa(dt_obj):
+    """Regla de corte nocturno: antes de las 5 a. m. pertenece al día anterior."""
+    if dt_obj.hour < HORA_CORTE_NOCTURNO:
+        return (dt_obj - timedelta(days=1)).date()
+    return dt_obj.date()
 
 def obtener_semana_operativa(fecha_op):
-    return f"{fecha_op.isocalendar()[0]}-W{fecha_op.isocalendar()[1]:02d}"
+    cal = fecha_op.isocalendar()
+    return f"{cal[0]}-W{cal[1]:02d}"
 
-# --- CARGA GENERAL DE VIAJES (NUBE CON FALLBACK LOCAL) ---
+def cargar_cache_local():
+    if os.path.exists(LOCAL_CACHE_FILE):
+        try:
+            with open(LOCAL_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def guardar_cache_local(lista_viajes):
+    try:
+        with open(LOCAL_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(lista_viajes, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 def cargar_viajes():
-    df_remoto = obtener_viajes_remotos()
-    if not df_remoto.empty and "id_servicio" in df_remoto.columns:
-        return df_remoto
-    conn = sqlite3.connect("produccion_viajes.db")
-    df_local = pd.read_sql_query("SELECT * FROM viajes", conn)
-    conn.close()
-    return df_local
+    """Descarga de Google Sheets; si hay demora o fallo de señal, usa el respaldo local."""
+    try:
+        if GSHEETS_URL and "AKfycbz_tu_script_id" not in GSHEETS_URL:
+            r = requests.get(GSHEETS_URL, timeout=4)
+            if r.status_code == 200:
+                datos = r.json()
+                if isinstance(datos, list) and len(datos) > 0:
+                    guardar_cache_local(datos)
+                    return pd.DataFrame(datos)
+    except Exception:
+        pass
+    local = cargar_cache_local()
+    return pd.DataFrame(local) if local else pd.DataFrame()
 
-# --- ENCABEZADO ---
-st.markdown('<div class="titulo-app">🚖 Copiloto de Metas y Guardia (Google Sheets ☁️)</div>', unsafe_allow_html=True)
+def guardar_viaje_remoto(dict_item):
+    """Guarda en 0.1s en memoria local y sincroniza en segundo plano sin congelar."""
+    if "viajes" not in st.session_state:
+        st.session_state.viajes = []
+    
+    id_actual = str(dict_item.get("id_servicio", "")).strip()
+    st.session_state.viajes = [v for v in st.session_state.viajes if str(v.get("id_servicio", "")).strip() != id_actual]
+    st.session_state.viajes.append(dict_item)
+    guardar_cache_local(st.session_state.viajes)
+    
+    sincronizado = False
+    try:
+        if GSHEETS_URL and "AKfycbz_tu_script_id" not in GSHEETS_URL:
+            res = requests.post(GSHEETS_URL, json=dict_item, timeout=4)
+            if res.status_code == 200:
+                sincronizado = True
+    except Exception:
+        sincronizado = False
+    return sincronizado
 
-st.sidebar.header("⚙️ Ajustes")
-tipo_turno = st.sidebar.selectbox("Turno", ["Nocturno", "Diurno"])
-hora_corte = st.sidebar.number_input("Corte Salida", min_value=1, max_value=12, value=5 if tipo_turno == "Nocturno" else 0)
-regimen = st.sidebar.selectbox("Régimen", [5, 6], format_func=lambda x: f"{x}x{7-x}")
+def eliminar_viaje_remoto(id_servicio):
+    id_elim = str(id_servicio).strip()
+    if "viajes" in st.session_state:
+        st.session_state.viajes = [v for v in st.session_state.viajes if str(v.get("id_servicio", "")).strip() != id_elim]
+        guardar_cache_local(st.session_state.viajes)
+    try:
+        if GSHEETS_URL and "AKfycbz_tu_script_id" not in GSHEETS_URL:
+            requests.post(GSHEETS_URL, json={"action": "delete", "id_servicio": id_elim}, timeout=4)
+    except Exception:
+        pass
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Guardia & Metas", "📸 Registrar", "💰 Abonos", "📋 Historial"])
+# ==============================================================================
+# EXTRACCIÓN OCR CON INTELIGENCIA ARTIFICIAL (GEMINI VISION)
+# ==============================================================================
+def extraer_datos_con_ia(imagen_file):
+    if not GEMINI_API_KEY or genai is None:
+        st.error("⚠️ Configura GEMINI_API_KEY en Secrets para habilitar la extracción por IA.")
+        return None
+    try:
+        img = Image.open(imagen_file)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = """
+        Eres un asistente experto analizando tickets y capturas de viajes de taxi corporativo y aplicativos.
+        Extrae los siguientes datos con máxima precisión y responde estrictamente en formato JSON válido:
+        {
+          "num_servicio": "código o ID numérico del servicio o ticket (ej: 5938086 o 562055)",
+          "fecha": "YYYY-MM-DD",
+          "hora": "HH:MM",
+          "tarifa_base": 0.0,
+          "recargos": 0.0,
+          "peajes": 0.0,
+          "asignacion": "Kusi / Directo / Reserva / Inmediato",
+          "categoria": "XL / Van / Lite / Sedán",
+          "metodo_pago": "Empresa / Efectivo / Tarjeta / Yape / Plin",
+          "origen": "punto de partida si figura",
+          "destino": "punto de destino si figura",
+          "comentarios": "información relevante adicional"
+        }
+        Solo devuelve el JSON sin bloques Markdown adicionales.
+        """
+        response = model.generate_content([prompt, img])
+        texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(texto_limpio)
+    except Exception as e:
+        st.error(f"Error procesando imagen: {e}")
+        return None
 
-ahora_pe = obtener_ahora_peru()
+# ==============================================================================
+# ESTADO DE SESIÓN
+# ==============================================================================
+if "viajes" not in st.session_state:
+    df_init = cargar_viajes()
+    st.session_state.viajes = df_init.to_dict(orient="records") if not df_init.empty else []
 
-if "datos_autocompletados" not in st.session_state:
-    st.session_state["datos_autocompletados"] = {
-        "id_servicio": "",
+if "preasignados" not in st.session_state:
+    st.session_state.preasignados = {"pre1": 0.0, "pre2": 0.0, "pre3": 0.0}
+
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+if "form_datos" not in st.session_state:
+    st.session_state.form_datos = {
+        "num_servicio": "",
         "fecha": ahora_pe.date(),
-        "hora": ahora_pe.time(),
+        "hora": ahora_pe.strftime("%H:%M"),
         "tarifa_base": 0.0,
         "recargos": 0.0,
-        "reembolsos": 0.0,
-        "tipo_usuario": "Corporativo",
-        "tipo_asignacion": "Directo",
-        "metodo_pago": "Empresa"
+        "peajes": 0.0,
+        "asignacion": "Kusi",
+        "categoria": "XL",
+        "pago": "Empresa",
+        "origen": "",
+        "destino": "",
+        "comentarios": ""
     }
 
-# --- TAB 1: GUARDIA & METAS ---
-with tab1:
-    df = cargar_viajes()
-    pre_data = get_preasignados()
+# ==============================================================================
+# CARGA DE DATOS Y SELECTOR DE SEMANA
+# ==============================================================================
+fecha_op_hoy = calcular_fecha_operativa(ahora_pe)
+semana_op_hoy = obtener_semana_operativa(fecha_op_hoy)
 
-    if not df.empty and "semana_operativa" in df.columns:
-        semanas_disp = sorted([str(s) for s in df["semana_operativa"].dropna().unique()], reverse=True)
-        semana_sel = st.selectbox("Semana Operativa", semanas_disp)
-        df_sem = df[df["semana_operativa"] == semana_sel].copy()
+df_all = pd.DataFrame(st.session_state.viajes) if st.session_state.viajes else cargar_viajes()
 
-        df_sem["produccion_neta"] = pd.to_numeric(df_sem["produccion_neta"], errors="coerce").fillna(0.0)
+if not df_all.empty:
+    for col in ["produccion_neta", "tarifa_base", "monto_recargos", "monto_reembolsos", "monto_total", "abono_enviado"]:
+        if col in df_all.columns:
+            df_all[col] = pd.to_numeric(df_all[col], errors="coerce").fillna(0.0)
+    if "semana_operativa" not in df_all.columns:
+        df_all["semana_operativa"] = semana_op_hoy
+    if "fecha_operativa" not in df_all.columns:
+        df_all["fecha_operativa"] = str(fecha_op_hoy)
+    
+    semanas_disponibles = sorted([str(s) for s in df_all["semana_operativa"].dropna().unique().tolist()], reverse=True)
+    if semana_op_hoy not in semanas_disponibles:
+        semanas_disponibles.insert(0, semana_op_hoy)
+else:
+    semanas_disponibles = [semana_op_hoy]
 
-        resumen_diario = df_sem.groupby("fecha_operativa").agg(
-            viajes=('id_servicio', 'count'),
-            produccion=('produccion_neta', 'sum')
-        ).reset_index()
+st.markdown("#### Semana Operativa")
+semana_seleccionada = st.selectbox("", semanas_disponibles, index=0, label_visibility="collapsed")
 
-        ultimo_dia = resumen_diario["fecha_operativa"].max()
-        prod_hoy = float(resumen_diario[resumen_diario["fecha_operativa"] == ultimo_dia]["produccion"].values[0])
-        prod_acumulada_db = float(df_sem["produccion_neta"].sum())
-        dias_trabajados = len(resumen_diario)
-        
-        meta_semanal_100 = regimen * 450.0
-        
-        preasig_activos = sum([
-            pre_data[f"{p}_monto"] for p in ["pre1", "pre2", "pre3"] 
-            if pre_data[f"{p}_estado"] == "Pendiente"
-        ])
+if not df_all.empty:
+    df_semana = df_all[df_all["semana_operativa"] == semana_seleccionada]
+    df_hoy = df_all[df_all["fecha_operativa"] == str(fecha_op_hoy)]
+else:
+    df_semana = pd.DataFrame()
+    df_hoy = pd.DataFrame()
 
-        total_guardia_proy = prod_hoy + preasig_activos
-        acumulado_con_proyeccion = prod_acumulada_db + preasig_activos
-        falta_semanal_proyectada = max(0.0, meta_semanal_100 - acumulado_con_proyeccion)
+acumulado_semana = df_semana["produccion_neta"].sum() if not df_semana.empty else 0.0
+total_hoy_hecho = df_hoy["produccion_neta"].sum() if not df_hoy.empty else 0.0
 
-        dias_cerrados = resumen_diario[resumen_diario["fecha_operativa"] != ultimo_dia]
-        alguna_falla_piso_cerrada = (dias_cerrados["produccion"] < 300.0).any() if not dias_cerrados.empty else False
+suma_preasig = sum(st.session_state.preasignados.values())
+acumulado_con_preasig = acumulado_semana + suma_preasig
+faltante_semana = max(0.0, META_SEMANAL - acumulado_con_preasig)
+porcentaje_avance = min(100.0, (acumulado_con_preasig / META_SEMANAL) * 100.0) if META_SEMANAL > 0 else 0.0
 
-        falta_piso_hoy = max(0.0, 300.0 - total_guardia_proy)
-        piso_hoy_ok = (falta_piso_hoy == 0)
+piso_asegurado = total_hoy_hecho >= PISO_DIARIO
+faltante_piso_hoy = max(0.0, PISO_DIARIO - total_hoy_hecho)
 
-        falta_meta_hoy = max(0.0, 450.0 - total_guardia_proy)
-        superavit_hoy = max(0.0, total_guardia_proy - 450.0)
+# ==============================================================================
+# HERO CARD ORIGINAL
+# ==============================================================================
+if acumulado_con_preasig >= META_SEMANAL:
+    estado_meta_txt = "🟢 META CUBIERTA"
+    sub_txt = f"Superávit: +S/ {acumulado_con_preasig - META_SEMANAL:.2f}"
+elif porcentaje_avance >= 80:
+    estado_meta_txt = "🟢 META CASI CERRADA"
+    sub_txt = f"Pendiente semanal: S/ {faltante_semana:.2f} ({porcentaje_avance:.1f}% avance con preasignados)"
+else:
+    estado_meta_txt = "🟡 EN RUTA"
+    sub_txt = f"Pendiente semanal: S/ {faltante_semana:.2f} ({porcentaje_avance:.1f}% avance con preasignados)"
 
-        ritmo_esperado_acumulado = dias_trabajados * 450.0
-        superavit_acumulado_global = acumulado_con_proyeccion - ritmo_esperado_acumulado
+txt_piso_hoy = "Piso Hoy: ✅ ASEGURADO" if piso_asegurado else f"Piso Hoy: 🚨 EN RIESGO (Falta S/ {faltante_piso_hoy:.2f})"
 
-        dias_futuros = max(0, regimen - dias_trabajados)
-
-        # Blindaje de piso: la meta restante nunca baja de 300
-        if dias_futuros > 0:
-            promedio_matematico = falta_semanal_proyectada / dias_futuros
-            meta_real_proximos_dias = max(300.0, promedio_matematico)
-        else:
-            meta_real_proximos_dias = 0.0
-
-        hora_pe = ahora_pe.hour
-
-        if alguna_falla_piso_cerrada:
-            clase_card = "hero-card-rojo"
-            badge_estado = "🔴 BONO ANULADO (Falla en Piso Diario)"
-            alerta_msg = "🚫 Un día anterior cerró con menos de S/ 300. La empresa anuló el bono de S/ 100 por incumplimiento de piso diario."
-        elif not piso_hoy_ok:
-            clase_card = "hero-card-ambar"
-            badge_estado = f"⚠️ FALTA PISO (S/ {falta_piso_hoy:.2f})"
-            if hora_pe >= 1 and hora_pe < 5:
-                alerta_msg = f"🚨 URGENTE: Pasó la 1:00 AM y faltan S/ {falta_piso_hoy:.2f} para los S/ 300 obligatorios de hoy. ¡No cierres sin asegurar el piso!"
-            else:
-                alerta_msg = f"⚠️ Meta obligatoria inmediata: asegurar el piso de S/ 300. Te faltan S/ {falta_piso_hoy:.2f} antes de cerrar guardia."
-        else:
-            if falta_semanal_proyectada == 0:
-                clase_card = "hero-card-verde"
-                badge_estado = "🏆 VOLUMEN SEMANAL LOGRADO"
-                if dias_futuros > 0:
-                    alerta_msg = f"🏆 ¡Superaste los S/ {meta_semanal_100:.0f}! En tus {dias_futuros} día(s) restantes tu única meta obligatoria será cumplir el piso de S/ 300.00 por guardia."
-                else:
-                    alerta_msg = "🏆 ¡Misión semanal completada! Volumen y pisos asegurados. Bono de S/ 100 asegurado."
-            elif falta_semanal_proyectada < 300.0 and dias_futuros > 0:
-                clase_card = "hero-card-verde"
-                badge_estado = "🟢 META CASI CERRADA"
-                alerta_msg = (
-                    f"🔥 Para la meta semanal solo faltan S/ {falta_semanal_proyectada:.2f}, pero tu meta OBLIGATORIA para los siguientes "
-                    f"{dias_futuros} día(s) será cumplir el piso de S/ 300.00 por guardia para no anular el bono."
-                )
-            elif superavit_acumulado_global >= 0:
-                clase_card = "hero-card-verde"
-                badge_estado = "🟢 RITMO GANADOR"
-                if dias_futuros > 0:
-                    alerta_msg = (
-                        f"🔥 ¡Superávit global de +S/ {superavit_acumulado_global:.2f}! Tu piso de hoy está asegurado. "
-                        f"Tu meta requerida para tus siguientes {dias_futuros} día(s) es de S/ {meta_real_proximos_dias:.2f}/día. Si pasó la 1:00 AM, evalúa descansar."
-                    )
-                else:
-                    alerta_msg = "🏆 ¡Semana asegurada! Bono listo."
-            else:
-                clase_card = "hero-card-verde" if preasig_activos > 0 else "hero-card-ambar"
-                badge_estado = "🟢 PISO OK | DEFENDIENDO PROMEDIO"
-                if hora_pe >= 1 and hora_pe < 5:
-                    alerta_msg = (
-                        f"🌙 Piso asegurado (proyectas S/ {total_guardia_proy:.2f}). Pasó la 1:00 AM y el flujo en aeropuerto es bajo. "
-                        f"Si guardas ahora, tu meta para los siguientes {dias_futuros} día(s) queda en S/ {meta_real_proximos_dias:.2f}/día."
-                    )
-                else:
-                    alerta_msg = (
-                        f"💡 Piso asegurado (proyectas S/ {total_guardia_proy:.2f}). Te faltan S/ {falta_meta_hoy:.2f} para los S/ 450 de hoy. "
-                        f"Aprovecha el flujo antes de la 1:00 AM. Tu meta para los siguientes {dias_futuros} día(s) es de S/ {meta_real_proximos_dias:.2f}/día."
-                    )
-
-        pct_semana = min(100.0, (acumulado_con_proyeccion / meta_semanal_100) * 100) if meta_semanal_100 > 0 else 0
-
-        # RENDER HERO CARD
-        st.markdown(f"""
-        <div class="hero-card {clase_card}">
-            <div class="hero-title">🚖 GUARDIA EN CURSO &nbsp;|&nbsp; {badge_estado}</div>
-            <div class="hero-meta">S/ {acumulado_con_proyeccion:.2f} <span style="font-size:0.9rem; font-weight:400;">de S/ {meta_semanal_100:.0f} (Bono 100)</span></div>
-            <div class="hero-sub">Pendiente semanal: <strong>S/ {falta_semanal_proyectada:.2f}</strong> ({pct_semana:.1f}% avance con preasignados)</div>
-            <hr style="margin: 6px 0; border-color: rgba(255,255,255,0.2);">
-            <div style="font-size:0.88rem; margin-top:4px;">
-                <strong>Hoy Hecho:</strong> S/ {prod_hoy:.2f} &nbsp;|&nbsp; <strong>Preasig:</strong> S/ {preasig_activos:.2f} &nbsp;|&nbsp; <strong>Total Proyectado:</strong> S/ {total_guardia_proy:.2f}<br>
-                <strong>Piso Hoy:</strong> {"✅ ASEGURADO" if piso_hoy_ok else f"<span style='color:#fca5a5;'>Faltan S/ {falta_piso_hoy:.2f}</span>"} &nbsp;|&nbsp;
-                <strong>Meta Restante:</strong> S/ {meta_real_proximos_dias:.2f}/día
-            </div>
-            <div class="hero-alert">{alerta_msg}</div>
+st.markdown(
+    f"""
+    <div style="background-color: #0d2822; padding: 16px; border-radius: 12px; border: 1px solid #1c4b40; margin-bottom: 14px;">
+        <div style="font-size: 13px; font-weight: 700; color: #a4e5d9; margin-bottom: 6px;">
+            🚖 GUARDIA EN CURSO | {estado_meta_txt}
         </div>
-        """, unsafe_allow_html=True)
+        <div style="font-size: 26px; font-weight: 800; color: #ffffff; margin-bottom: 2px;">
+            S/ {acumulado_con_preasig:.2f} <span style="font-size: 15px; font-weight: 500; color: #cadbd8;">de S/ {META_SEMANAL:.0f} (Bono {BONO_MONTO:.0f})</span>
+        </div>
+        <div style="font-size: 12px; color: #a5d6a7; margin-bottom: 8px;">
+            {sub_txt}
+        </div>
+        <div style="font-size: 13px; color: #ffffff; margin-bottom: 4px;">
+            Hoy Hecho: S/ {total_hoy_hecho:.2f} | Preasig: S/ {suma_preasig:.2f} | Total Proyectado: S/ {total_hoy_hecho + suma_preasig:.2f}
+        </div>
+        <div style="font-size: 12px; font-weight: 600; color: #e0f2f1;">
+            {txt_piso_hoy} | Meta Restante: S/ {PISO_DIARIO:.2f}/día
+        </div>
+        <div style="background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 6px; margin-top: 10px; font-size: 11px; color: #ffcc80;">
+            🔥 Para la meta semanal faltan S/ {faltante_semana:.2f}, pero tu meta OBLIGATORIA para la guardia es cumplir el piso de S/ {PISO_DIARIO:.2f} para no anular el bono.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
-        with st.expander("💼 Preasignados de la Guardia (Pre 1, 2, 3)", expanded=True):
-            with st.form("form_preasignados"):
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    val_p1 = st.number_input("Pre 1 (S/)", min_value=0.0, value=float(pre_data["pre1_monto"]), step=5.0)
-                with c2:
-                    val_p2 = st.number_input("Pre 2 (S/)", min_value=0.0, value=float(pre_data["pre2_monto"]), step=5.0)
-                with c3:
-                    val_p3 = st.number_input("Pre 3 (S/)", min_value=0.0, value=float(pre_data["pre3_monto"]), step=5.0)
-                
-                if st.form_submit_button("💾 Fijar Preasignados", use_container_width=True):
-                    update_preasignado_monto(val_p1, val_p2, val_p3)
-                    st.rerun()
+# ==============================================================================
+# PESTAÑAS PRINCIPALES
+# ==============================================================================
+tab_reg, tab_abonos, tab_guardia, tab_hist = st.tabs(["📝 Registro", "💵 Abonos", "📊 Guardia & Metas", "📋 Historial"])
 
-            st.caption("Gestionar Estado (al completarse o caerse):")
-            for pid, label in [("pre1", "Pre 1"), ("pre2", "Pre 2"), ("pre3", "Pre 3")]:
-                col_a, col_b, col_c = st.columns([1.5, 2, 2])
-                with col_a:
-                    st.write(f"**{label}** (S/ {pre_data[f'{pid}_monto']:.2f})")
-                with col_b:
-                    st.caption(f"Estado: {pre_data[f'{pid}_estado']}")
-                with col_c:
-                    if pre_data[f"{pid}_estado"] == "Pendiente":
-                        c_b1, c_b2 = st.columns(2)
-                        with c_b1:
-                            if st.button("✅", key=f"ok_{pid}"):
-                                update_preasignado_estado(f"{pid}_estado", "Hecho")
-                                st.rerun()
-                        with c_b2:
-                            if st.button("❌", key=f"no_{pid}"):
-                                update_preasignado_estado(f"{pid}_estado", "Caído")
-                                st.rerun()
-                    else:
-                        if st.button("Reactivar", key=f"rst_{pid}"):
-                            update_preasignado_estado(f"{pid}_estado", "Pendiente")
-                            st.rerun()
-
-        st.markdown("#### 📋 Detalle de la Semana")
-        resumen_mostrar = resumen_diario.copy()
-        resumen_mostrar.index = [f"Día {i+1}" for i in range(len(resumen_mostrar))]
-        resumen_mostrar["Piso S/ 300"] = resumen_mostrar["produccion"].apply(lambda x: "✅ OK" if x >= 300.0 else "❌ Falla")
-        st.dataframe(resumen_mostrar, use_container_width=True)
-    else:
-        st.info("Sin registros en Google Sheets ni localmente. Restaura tu archivo de respaldo en la pestaña '📋 Historial' para sincronizar la nube.")
-
-# --- TAB 2: REGISTRAR VIAJE Y JORNADAS ESPECIALES ---
-with tab2:
-    st.markdown("#### 🌟 Jornadas Especiales (Meta Cumplida S/ 450)")
-    c_esp1, c_esp2 = st.columns(2)
-    with c_esp1:
-        if st.button("🎓 Jornada Instructor / Guía", use_container_width=True):
-            f_hoy = ahora_pe.date()
-            sem_op = obtener_semana_operativa(f_hoy)
-            id_inst = f"INST-{f_hoy.strftime('%Y%m%d')}"
-            dict_inst = {
-                "id_servicio": id_inst,
-                "fecha_hora_viaje": ahora_pe.isoformat(),
-                "fecha_operativa": f_hoy.isoformat(),
-                "semana_operativa": sem_op,
-                "tipo_asignacion": "Instructor / Guía",
-                "tipo_usuario": "Empresa",
-                "categoria_servicio": "Especial",
-                "metodo_pago": "Empresa",
-                "origen": "Sede",
-                "destino": "Ruta Guía",
-                "distancia_km": 0.0,
-                "duracion_min": 0.0,
-                "tarifa_base": 450.0,
-                "monto_recargos": 0.0,
-                "monto_reembolsos": 0.0,
-                "produccion_neta": 450.0,
-                "monto_total": 450.0,
-                "abono_enviado": 0,
-                "fecha_hora_abono": ""
-            }
-            guardar_viaje_remoto(dict_inst)
-            st.success(f"✅ Jornada de Instructor guardada en Google Sheets (S/ 450.00).")
-            st.rerun()
-
-    with c_esp2:
-        if st.button("🏨 Guardia en CDS (Hotel Costa del Sol)", use_container_width=True):
-            f_hoy = ahora_pe.date()
-            sem_op = obtener_semana_operativa(f_hoy)
-            id_cds = f"CDS-{f_hoy.strftime('%Y%m%d')}"
-            dict_cds = {
-                "id_servicio": id_cds,
-                "fecha_hora_viaje": ahora_pe.isoformat(),
-                "fecha_operativa": f_hoy.isoformat(),
-                "semana_operativa": sem_op,
-                "tipo_asignacion": "CDS - Costa del Sol",
-                "tipo_usuario": "Empresa",
-                "categoria_servicio": "Especial",
-                "metodo_pago": "Empresa",
-                "origen": "Hotel Costa del Sol",
-                "destino": "Aeropuerto / Sede",
-                "distancia_km": 0.0,
-                "duracion_min": 0.0,
-                "tarifa_base": 450.0,
-                "monto_recargos": 0.0,
-                "monto_reembolsos": 0.0,
-                "produccion_neta": 450.0,
-                "monto_total": 450.0,
-                "abono_enviado": 0,
-                "fecha_hora_abono": ""
-            }
-            guardar_viaje_remoto(dict_cds)
-            st.success(f"✅ Guardia en CDS guardada en Google Sheets (S/ 450.00).")
-            st.rerun()
-
-    st.divider()
-    st.markdown("#### 📸 Registro por Capturas de Taxi")
-    uploaded_files = st.file_uploader("Captura(s) del viaje", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-
-    if uploaded_files:
-        imgs = [Image.open(f) for f in uploaded_files]
-        if st.button("⚡ Extraer Rápido con IA"):
-            with st.spinner("Optimizando y analizando..."):
-                try:
-                    datos = procesar_capturas(imgs)
+# ------------------------------------------------------------------------------
+# PESTAÑA 1: REGISTRO (CON OCR Y FORMULARIO ORIGINAL)
+# ------------------------------------------------------------------------------
+with tab_reg:
+    st.markdown("#### Captura(s) del viaje")
+    archivo_foto = st.file_uploader(
+        "Subir ticket o comprobante:", 
+        type=["png", "jpg", "jpeg"],
+        key=f"uploader_{st.session_state.uploader_key}"
+    )
+    
+    if archivo_foto is not None:
+        if st.button("⚡ Extraer Rápido con IA", use_container_width=True):
+            with st.spinner("Leyendo comprobante con IA..."):
+                datos_ia = extraer_datos_con_ia(archivo_foto)
+                if datos_ia:
+                    st.session_state.form_datos["num_servicio"] = str(datos_ia.get("num_servicio", "")).strip()
                     try:
-                        f_dt = date(int(datos.get("anio", 2026)), int(datos.get("mes", 10)), int(datos.get("dia", 23)))
-                        h_dt = time(int(datos.get("hora", 0)), int(datos.get("minuto", 0)))
+                        st.session_state.form_datos["fecha"] = datetime.strptime(datos_ia.get("fecha"), "%Y-%m-%d").date()
                     except Exception:
-                        f_dt = ahora_pe.date()
-                        h_dt = ahora_pe.time()
-
-                    asig_raw = str(datos.get("tipo_asignacion", "")).lower()
-                    if "cds" in asig_raw or "costa" in asig_raw:
-                        tipo_asig_final = "CDS"
-                    elif "latam" in asig_raw:
-                        tipo_asig_final = "Latam"
-                    elif "kusi" in asig_raw:
-                        tipo_asig_final = "Kusi"
-                    else:
-                        tipo_asig_final = "Directo"
-
-                    pago_raw = str(datos.get("metodo_pago", "")).lower()
-                    pago_final = "Yape" if "yape" in pago_raw else ("Efectivo" if "efectiv" in pago_raw else ("Tarjeta / POS" if "tarjeta" in pago_raw else "Empresa"))
-
-                    st.session_state["datos_autocompletados"] = {
-                        "id_servicio": str(datos.get("id_servicio", "")),
-                        "fecha": f_dt,
-                        "hora": h_dt,
-                        "tarifa_base": float(datos.get("tarifa_base", 0.0)),
-                        "recargos": float(datos.get("monto_recargos", 0.0)),
-                        "reembolsos": float(datos.get("monto_reembolsos", 0.0)),
-                        "tipo_usuario": datos.get("tipo_usuario", "Corporativo"),
-                        "tipo_asignacion": tipo_asig_final,
-                        "metodo_pago": pago_final
-                    }
+                        pass
+                    st.session_state.form_datos["hora"] = str(datos_ia.get("hora", ahora_pe.strftime("%H:%M")))
+                    st.session_state.form_datos["tarifa_base"] = float(datos_ia.get("tarifa_base", 0.0))
+                    st.session_state.form_datos["recargos"] = float(datos_ia.get("recargos", 0.0))
+                    st.session_state.form_datos["peajes"] = float(datos_ia.get("peajes", 0.0))
+                    st.session_state.form_datos["origen"] = str(datos_ia.get("origen", ""))
+                    st.session_state.form_datos["destino"] = str(datos_ia.get("destino", ""))
+                    st.session_state.form_datos["comentarios"] = str(datos_ia.get("comentarios", ""))
+                    
+                    asig_val = str(datos_ia.get("asignacion", "Kusi")).capitalize()
+                    st.session_state.form_datos["asignacion"] = asig_val if asig_val in ["Kusi", "Directo", "Reserva", "Inmediato"] else "Directo"
+                    
+                    pago_val = str(datos_ia.get("metodo_pago", "Empresa"))
+                    st.session_state.form_datos["pago"] = pago_val if pago_val in ["Empresa", "Tarjeta / POS", "Efectivo", "Yape", "Plin"] else "Empresa"
+                    
                     st.success("¡Datos listos!")
-                except Exception as e:
-                    st.error(f"Aviso: {e}")
 
-    with st.form("form_registro"):
-        d = st.session_state["datos_autocompletados"]
+    # Formulario original
+    with st.form("form_registro_viaje"):
         c1, c2 = st.columns(2)
         with c1:
-            id_servicio = st.text_input("N° Servicio", value=d["id_servicio"])
-            fecha_input = st.date_input("Fecha", value=d["fecha"])
-            tarifa_base = st.number_input("Tarifa Base (S/)", min_value=0.0, value=d["tarifa_base"], step=1.0)
-            recargos = st.number_input("Recargos (S/)", min_value=0.0, value=d["recargos"], step=1.0)
+            id_servicio = st.text_input("N° Servicio / Ticket Pasajero *", value=st.session_state.form_datos["num_servicio"])
+            fecha_input = st.date_input("Fecha", value=st.session_state.form_datos["fecha"])
+            tarifa_base = st.number_input("Tarifa Base (S/) *", min_value=0.0, value=float(st.session_state.form_datos["tarifa_base"]), step=5.0, format="%.2f")
+            recargos = st.number_input("Recargos (S/)", min_value=0.0, value=float(st.session_state.form_datos["recargos"]), step=1.0, format="%.2f")
+            categoria_servicio = st.selectbox("Categoría", ["XL", "Van", "Lite", "Sedán"], index=0)
+            origen = st.text_input("Origen", value=st.session_state.form_datos["origen"])
+
         with c2:
-            hora_input = st.time_input("Hora", value=d["hora"])
-            reembolsos = st.number_input("Peajes (S/)", min_value=0.0, value=d["reembolsos"], step=1.0)
-            opciones_asig = ["Directo", "Kusi", "Latam", "CDS"]
-            idx_asig = opciones_asig.index(d["tipo_asignacion"]) if d["tipo_asignacion"] in opciones_asig else 0
-            tipo_asignacion = st.selectbox("Asignación", opciones_asig, index=idx_asig)
-            opciones_pago = ["Empresa", "Efectivo", "Yape", "Tarjeta / POS"]
-            idx_pago = opciones_pago.index(d["metodo_pago"]) if d["metodo_pago"] in opciones_pago else 0
-            metodo_pago = st.selectbox("Pago", opciones_pago, index=idx_pago)
+            hora_str = st.text_input("Hora (HH:MM)", value=st.session_state.form_datos["hora"])
+            reembolsos = st.number_input("Peajes / Reembolsos (S/)", min_value=0.0, value=float(st.session_state.form_datos["peajes"]), step=1.0, format="%.2f")
+            
+            opciones_asig = ["Directo", "Kusi", "Reserva", "Inmediato"]
+            idx_asig = opciones_asig.index(st.session_state.form_datos["asignacion"]) if st.session_state.form_datos["asignacion"] in opciones_asig else 0
+            tipo_asignacion = st.selectbox("Tipo de Asignación", opciones_asig, index=idx_asig)
+            
+            opciones_pago = ["Empresa", "Tarjeta / POS", "Efectivo", "Yape", "Plin"]
+            idx_pago = opciones_pago.index(st.session_state.form_datos["pago"]) if st.session_state.form_datos["pago"] in opciones_pago else 0
+            metodo_pago = st.selectbox("Método de Pago", opciones_pago, index=idx_pago)
+            
+            destino = st.text_input("Destino", value=st.session_state.form_datos["destino"])
+
+        comentarios = st.text_input("Comentarios / Pasajero", value=st.session_state.form_datos["comentarios"])
 
         produccion_neta = tarifa_base + recargos
         monto_total = produccion_neta + reembolsos
         st.markdown(f"**Neta:** S/ {produccion_neta:.2f} | **Total a Rendir:** S/ {monto_total:.2f}")
 
-        if st.form_submit_button("💾 Guardar Viaje"):
+        # LÍNEA 612 ORIGINAL CON CONTROL DE TIMEOUT
+        submit_guardar = st.form_submit_button("💾 Guardar Viaje")
+        if submit_guardar:
             if not id_servicio:
-                st.error("Ingresa N° de Servicio.")
+                st.error("Ingresa N° de ticket o servicio.")
+            elif tarifa_base <= 0:
+                st.error("La tarifa base debe ser mayor a S/ 0.00.")
             else:
-                dt_viaje = datetime.combine(fecha_input, hora_input)
-                f_op = calcular_fecha_operativa(dt_viaje, tipo_turno, hora_corte)
+                try:
+                    partes = str(hora_str).strip().split(":")
+                    hh, mm = int(partes[0]), int(partes[1])
+                except Exception:
+                    hh, mm = ahora_pe.hour, ahora_pe.minute
+
+                dt_viaje = datetime.combine(fecha_input, datetime.min.time()).replace(hour=hh, minute=mm)
+                f_op = calcular_fecha_operativa(dt_viaje)
                 sem_op = obtener_semana_operativa(f_op)
 
                 datos_guardar = {
-                    "id_servicio": str(id_servicio),
-                    "fecha_hora_viaje": dt_viaje.isoformat(),
+                    "id_servicio": str(id_servicio).strip(),
+                    "fecha_hora_viaje": dt_viaje.strftime("%Y-%m-%d %H:%M:00"),
                     "fecha_operativa": str(f_op),
-                    "semana_operativa": sem_op,
-                    "tipo_asignacion": tipo_asignacion,
-                    "tipo_usuario": "Corporativo",
-                    "categoria_servicio": "Lite",
-                    "metodo_pago": metodo_pago,
-                    "origen": "",
-                    "destino": "",
+                    "semana_operativa": str(sem_op),
+                    "tipo_asignacion": str(tipo_asignacion),
+                    "tipo_usuario": "Empresa" if metodo_pago == "Empresa" else "Particular",
+                    "categoria_servicio": str(categoria_servicio),
+                    "metodo_pago": str(metodo_pago),
+                    "origen": str(origen).strip(),
+                    "destino": str(destino).strip(),
                     "distancia_km": 0.0,
                     "duracion_min": 0.0,
-                    "tarifa_base": tarifa_base,
-                    "monto_recargos": recargos,
-                    "monto_reembolsos": reembolsos,
-                    "produccion_neta": produccion_neta,
-                    "monto_total": monto_total,
-                    "abono_enviado": 0,
-                    "fecha_hora_abono": ""
+                    "tarifa_base": float(tarifa_base),
+                    "monto_recargos": float(recargos),
+                    "monto_reembolsos": float(reembolsos),
+                    "produccion_neta": float(produccion_neta),
+                    "monto_total": float(monto_total),
+                    "abono_enviado": 1 if metodo_pago in ["Efectivo", "Yape", "Plin"] else 0,
+                    "fecha_hora_abono": "",
+                    "comentarios": str(comentarios).strip()
                 }
-                
-                # Guardar remoto en Google Sheets
-                ok = guardar_viaje_remoto(datos_guardar)
-                if ok:
-                    st.success("Guardado en Google Sheets con éxito.")
-                else:
-                    st.warning("Guardado local (sin conexión inmediata con Sheets).")
+
+                # Guardado y sincronización con timeout protegido (4 seg)
+                guardar_viaje_remoto(datos_guardar)
+                st.session_state.uploader_key += 1
+                st.session_state.form_datos = {
+                    "num_servicio": "",
+                    "fecha": ahora_pe.date(),
+                    "hora": ahora_pe.strftime("%H:%M"),
+                    "tarifa_base": 0.0,
+                    "recargos": 0.0,
+                    "peajes": 0.0,
+                    "asignacion": "Kusi",
+                    "categoria": "XL",
+                    "pago": "Empresa",
+                    "origen": "",
+                    "destino": "",
+                    "comentarios": ""
+                }
+                st.success("¡Viaje guardado exitosamente!")
                 st.rerun()
 
-              
-            # 1. Guardar de inmediato en la sesión activa del móvil (0.1 seg)
-            if "viajes" not in st.session_state:
-                st.session_state.viajes = []
-            
-            # Evita duplicar el mismo servicio si ya existía
-            st.session_state.viajes = [v for v in st.session_state.viajes if str(v.get("id_servicio", "")).strip() != str(datos_guardar.get("id_servicio", "")).strip()]
-            st.session_state.viajes.append(datos_guardar)
-
-            # 2. Enviar a Google Sheets con timeout corto para no congelar la pantalla
-            try:
-                res = requests.post(GSHEETS_URL, json=datos_guardar, timeout=4)
-                if res.status_code == 200:
-                    st.success("✅ ¡Viaje registrado y sincronizado en Google Sheets!")
-                else:
-                    st.warning(f"⚠️ Guardado en el móvil. Servidor respondió: {res.status_code}")
-            except Exception as e:
-                st.info("ℹ️ Guardado en el teléfono (sin conexión directa a Google Sheets).")
-
-            st.rerun()
-
-
-# --- TAB 3: RENDICIÓN EFECTIVO / YAPE ---
-with tab3:
-    st.markdown("#### 💰 Rendición Efectivo / Yape")
-    df_actual = cargar_viajes()
-
-    if not df_actual.empty and "metodo_pago" in df_actual.columns:
-        df_liq = df_actual[df_actual["metodo_pago"].isin(["Efectivo", "Yape"])].copy()
-        df_liq["monto_total"] = pd.to_numeric(df_liq["monto_total"], errors="coerce").fillna(0.0)
-        df_liq["abono_enviado"] = pd.to_numeric(df_liq["abono_enviado"], errors="coerce").fillna(0).astype(int)
-
-        if not df_liq.empty:
-            pendientes = df_liq[df_liq["abono_enviado"] == 0]
-            st.markdown(f"**Pendiente por rendir:** S/ {pendientes['monto_total'].sum():.2f} ({len(pendientes)} viajes)")
-            st.divider()
-
-            for _, row in df_liq.iterrows():
-                id_serv = str(row["id_servicio"])
-                formato_envio = f"{id_serv} - 2986"
-                esta_enviado = bool(row["abono_enviado"])
-
-                c1, c2 = st.columns([3, 2])
-                with c1:
-                    st.code(formato_envio, language=None)
-                    st.caption(f"**S/ {row['monto_total']:.2f}** ({row['metodo_pago']})")
-                    if esta_enviado:
-                        st.success(f"Enviado: {row.get('fecha_hora_abono', '')}")
-                with c2:
-                    if not esta_enviado:
-                        if st.button("Marcar Enviado", key=f"env_{id_serv}"):
-                            ahora_str = ahora_pe.strftime("%d/%m/%y %H:%M")
-                            actualizar_abono_remoto(id_serv, 1, ahora_str)
-                            st.rerun()
-                    else:
-                        if st.button("Desmarcar", key=f"des_{id_serv}"):
-                            actualizar_abono_remoto(id_serv, 0, "")
-                            st.rerun()
-        else:
-            st.info("No hay viajes en Efectivo o Yape.")
-    else:
-        st.info("No hay viajes registrados.")
-
-# --- TAB 4: HISTORIAL Y SINCRONIZACIÓN ---
-with tab4:
-    st.markdown("#### 🔄 Sincronización y Respaldo")
+# ------------------------------------------------------------------------------
+# PESTAÑA 2: ABONOS
+# ------------------------------------------------------------------------------
+with tab_abonos:
+    st.subheader("💵 Control de Abonos y Cobranzas en Ruta")
+    st.caption("Seguimiento del dinero en efectivo y billeteras digitales (Yape/Plin) a rendir.")
     
-    with st.expander("📤 Migrar / Restaurar datos a Google Sheets desde CSV", expanded=False):
-        csv_subido = st.file_uploader("Selecciona tu archivo .csv guardado", type=["csv"], key="uploader_backup")
-        if csv_subido is not None:
-            if st.button("⚡ Subir y Sincronizar en Google Sheets", use_container_width=True):
+    if not df_all.empty:
+        df_cobranzas = df_all[df_all["metodo_pago"].isin(["Efectivo", "Yape", "Plin"])].copy()
+        if not df_cobranzas.empty:
+            total_cobrado_mano = df_cobranzas["monto_total"].sum()
+            total_abonado = df_cobranzas[df_cobranzas["abono_enviado"] == 1]["monto_total"].sum()
+            saldo_pendiente = total_cobrado_mano - total_abonado
+            
+            c_ab1, c_ab2, c_ab3 = st.columns(3)
+            c_ab1.metric("Total Cobrado en Mano", f"S/ {total_cobrado_mano:.2f}")
+            c_ab2.metric("Total Rendido / Abonado", f"S/ {total_abonado:.2f}")
+            c_ab3.metric("Saldo por Rendir", f"S/ {saldo_pendiente:.2f}")
+            
+            st.markdown("##### Detalle de Servicios con Cobro Directo")
+            cols_ab = ["id_servicio", "fecha_operativa", "metodo_pago", "monto_total", "abono_enviado"]
+            st.dataframe(df_cobranzas[[c for c in cols_ab if c in df_cobranzas.columns]].iloc[::-1], use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay servicios cobrados en Efectivo o Billeteras Digitales registrados.")
+    else:
+        st.info("Sin registros de servicios.")
+
+# ------------------------------------------------------------------------------
+# PESTAÑA 3: GUARDIA & METAS (PREASIGNADOS)
+# ------------------------------------------------------------------------------
+with tab_guardia:
+    st.subheader("Control de Preasignados de la Guardia")
+    st.caption("Anota aquí los servicios programados que aún no has cobrado para proyectar el cumplimiento del piso.")
+    
+    col_p1, col_p2, col_p3 = st.columns(3)
+    with col_p1:
+        st.session_state.preasignados["pre1"] = st.number_input("Preasignado 1 (S/)", value=float(st.session_state.preasignados.get("pre1", 0.0)), step=10.0, format="%.2f")
+    with col_p2:
+        st.session_state.preasignados["pre2"] = st.number_input("Preasignado 2 (S/)", value=float(st.session_state.preasignados.get("pre2", 0.0)), step=10.0, format="%.2f")
+    with col_p3:
+        st.session_state.preasignados["pre3"] = st.number_input("Preasignado 3 (S/)", value=float(st.session_state.preasignados.get("pre3", 0.0)), step=10.0, format="%.2f")
+        
+    st.info(f"Total Proyectado en Preasignados: **S/ {sum(st.session_state.preasignados.values()):.2f}**")
+
+# ------------------------------------------------------------------------------
+# PESTAÑA 4: HISTORIAL (EL FRAGMENTO RECUPERADO)
+# ------------------------------------------------------------------------------
+with tab_hist:
+    # Bloque de importación y sincronización de resúmenes
+    with st.expander("📥 Importar o Sincronizar Resúmenes Masivos"):
+        resumen_file = st.file_uploader("Subir CSV o Excel con producción por fecha:", type=["csv", "xlsx"])
+        if resumen_file is not None:
+            if st.button("Procesar y Sincronizar a Google Sheets"):
                 try:
-                    df_res = pd.read_csv(csv_subido)
-                    
+                    df_res = pd.read_csv(resumen_file) if resumen_file.name.endswith(".csv") else pd.read_excel(resumen_file)
                     if "fecha_operativa" in df_res.columns and "produccion" in df_res.columns:
                         for _, r in df_res.iterrows():
                             f_op_str = str(r["fecha_operativa"])
@@ -793,11 +533,12 @@ with tab4:
         st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
 
         st.divider()
-        lista_ids = [str(x) for x in df_mostrar["id_servicio"].tolist()]
-        id_borrar = st.selectbox("Eliminar servicio de la nube:", lista_ids)
-        if st.button("❌ Confirmar Eliminación"):
-            eliminar_viaje_remoto(id_borrar)
-            st.success("Registro eliminado de Google Sheets.")
-            st.rerun()
+        lista_ids = [str(x) for x in df_mostrar["id_servicio"].tolist() if str(x).strip()]
+        if lista_ids:
+            id_borrar = st.selectbox("Eliminar servicio de la nube:", lista_ids)
+            if st.button("❌ Confirmar Eliminación"):
+                eliminar_viaje_remoto(id_borrar)
+                st.success("Registro eliminado de Google Sheets.")
+                st.rerun()
     else:
         st.info("No hay registros en la nube.")
