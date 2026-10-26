@@ -647,6 +647,28 @@ with tab2:
                     st.warning("Guardado local (sin conexión inmediata con Sheets).")
                 st.rerun()
 
+              
+            # 1. Guardar de inmediato en la sesión activa del móvil (0.1 seg)
+            if "viajes" not in st.session_state:
+                st.session_state.viajes = []
+            
+            # Evita duplicar el mismo servicio si ya existía
+            st.session_state.viajes = [v for v in st.session_state.viajes if str(v.get("id_servicio", "")).strip() != str(datos_guardar.get("id_servicio", "")).strip()]
+            st.session_state.viajes.append(datos_guardar)
+
+            # 2. Enviar a Google Sheets con timeout corto para no congelar la pantalla
+            try:
+                res = requests.post(GSHEETS_URL, json=datos_guardar, timeout=4)
+                if res.status_code == 200:
+                    st.success("✅ ¡Viaje registrado y sincronizado en Google Sheets!")
+                else:
+                    st.warning(f"⚠️ Guardado en el móvil. Servidor respondió: {res.status_code}")
+            except Exception as e:
+                st.info("ℹ️ Guardado en el teléfono (sin conexión directa a Google Sheets).")
+
+            st.rerun()
+
+
 # --- TAB 3: RENDICIÓN EFECTIVO / YAPE ---
 with tab3:
     st.markdown("#### 💰 Rendición Efectivo / Yape")
