@@ -3,12 +3,10 @@ import pandas as pd
 import requests
 import json
 import os
-from datetime import datetime, date, timedelta
-from PIL import Image
-import google.generativeai as genai
+from datetime import datetime, date, timedelta, timezone
 
 # ==============================================================================
-# CONFIGURACIÓN GENERAL Y ESTILOS MÓVILES
+# CONFIGURACIÓN GENERAL Y TEMA MÓVIL
 # ==============================================================================
 st.set_page_config(
     page_title="Copiloto Táctico de Viajes",
@@ -16,27 +14,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-from datetime import timezone
 
-# UTC-5 fijo para Lima
+# Zona horaria nativa Lima (UTC-5) sin dependencias externas
 TZ_LIMA = timezone(timedelta(hours=-5))
 
 def obtener_ahora():
     return datetime.now(TZ_LIMA)
-    
 
-# ==============================================================================
-# SECRETOS Y CONSTANTES
-# ==============================================================================
-# Configurar API Key de Gemini
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-# URL del Webhook de Google Apps Script
+# Webhook de Google Apps Script (toma el secret o variable de entorno)
 GSHEETS_URL = st.secrets.get(
     "GSHEETS_URL", 
-    os.environ.get("GSHEETS_URL", "https://script.google.com/macros/s/AKfycbx_TU_SCRIPT_ID/exec")
+    os.environ.get("GSHEETS_URL", "https://script.google.com/macros/s/AKfycbz_tu_script_id_aqui/exec")
 )
 
 LOCAL_CACHE_FILE = "viajes_cache.json"
@@ -47,10 +35,10 @@ PISO_DIARIO = 300.00
 HORA_CORTE_NOCTURNO = 5  # 05:00 a. m.
 
 # ==============================================================================
-# FUNCIONES DE FECHAS Y PERSISTENCIA (OFFLINE FIRST)
+# GESTIÓN DE TIEMPO Y PERSISTENCIA (OFFLINE FIRST)
 # ==============================================================================
 def calcular_fecha_operativa(dt_obj):
-    """Regla de corte nocturno: antes de las 5 a. m. pertenece a la guardia previa."""
+    """Regla de turno nocturno: antes de las 5 a. m. pertenece al día anterior."""
     if dt_obj.hour < HORA_CORTE_NOCTURNO:
         return (dt_obj - timedelta(days=1)).date()
     return dt_obj.date()
@@ -76,58 +64,40 @@ def guardar_cache_local(lista_viajes):
         pass
 
 def sincronizar_desde_nube():
-    """Descarga datos de Google Sheets; si hay demora o timeout, usa el respaldo local."""
+    """Descarga de Google Sheets con timeout corto (4 seg). Si falla, recurre a caché local."""
     try:
-        r = requests.get(GSHEETS_URL, timeout=4)
-        if r.status_code == 200:
-            datos = r.json()
-            if isinstance(datos, list) and len(datos) > 0:
-                guardar_cache_local(datos)
-                return datos
+        if GSHEETS_URL and "AKfycbz_tu_script_id" not in GSHEETS_URL:
+            r = requests.get(GSHEETS_URL, timeout=4)
+            if r.status_code == 200:
+                datos = r.json()
+                if isinstance(datos, list) and len(datos) > 0:
+                    guardar_cache_local(datos)
+                    return datos
     except Exception:
         pass
     return cargar_cache_local()
 
-# Inicialización de variables de sesión
+# Inicialización de estado en memoria
 if "viajes" not in st.session_state:
     st.session_state.viajes = sincronizar_desde_nube()
 
 if "preasignados" not in st.session_state:
     st.session_state.preasignados = {"pre1": 0.0, "pre2": 0.0, "pre3": 0.0}
 
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
-
-if "form_datos" not in st.session_state:
-    st.session_state.form_datos = {
-        "num_servicio": "",
-        "fecha": obtener_ahora().date(),
-        "hora": obtener_ahora().strftime("%H:%M"),
-        "tarifa_base": 0.0,
-        "recargos": 0.0,
-        "peajes": 0.0,
-        "asignacion": "Kusi",
-        "categoria": "XL",
-        "pago": "Empresa",
-        "origen": "",
-        "destino": "",
-        "comentarios": ""
-    }
-
 def guardar_viaje_seguro(registro):
-    """Guarda al instante en local (0.1 seg) y sincroniza con Google en background."""
+    """Guarda en 0.1s en memoria local y sincroniza en background sin congelar."""
     id_nuevo = str(registro["id_servicio"]).strip()
     viajes_filtrados = [v for v in st.session_state.viajes if str(v.get("id_servicio")).strip() != id_nuevo]
     viajes_filtrados.append(registro)
     st.session_state.viajes = viajes_filtrados
     
-    # Respaldo inmediato en archivo JSON
+    # Respaldo inmediato en disco
     guardar_cache_local(viajes_filtrados)
     
-    # Sincronización con Google Apps Script sin bloquear el hilo principal
+    # Sincronización con Google Apps Script (máximo 3 segundos)
     sincronizado = False
     try:
-        if GSHEETS_URL and "AKfycbx_TU_SCRIPT_ID" not in GSHEETS_URL:
+        if GSHEETS_URL and "AKfycbz_tu_script_id" not in GSHEETS_URL:
             res = requests.post(GSHEETS_URL, json=registro, timeout=3)
             if res.status_code == 200:
                 sincronizado = True
@@ -141,51 +111,13 @@ def eliminar_viaje_seguro(id_servicio):
     st.session_state.viajes = [v for v in st.session_state.viajes if str(v.get("id_servicio")).strip() != id_elim]
     guardar_cache_local(st.session_state.viajes)
     try:
-        if GSHEETS_URL and "AKfycbx_TU_SCRIPT_ID" not in GSHEETS_URL:
+        if GSHEETS_URL and "AKfycbz_tu_script_id" not in GSHEETS_URL:
             requests.post(GSHEETS_URL, json={"action": "delete", "id_servicio": id_elim}, timeout=3)
     except Exception:
         pass
 
 # ==============================================================================
-# EXTRACCIÓN OCR CON INTELIGENCIA ARTIFICIAL (GEMINI VISION)
-# ==============================================================================
-def extraer_datos_con_ia(imagen_file):
-    if not GEMINI_API_KEY:
-        st.error("⚠️ Configura GEMINI_API_KEY en Secrets para habilitar la extracción por IA.")
-        return None
-    
-    try:
-        img = Image.open(imagen_file)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        
-        prompt = """
-        Eres un asistente experto analizando tickets y capturas de viajes de taxi corporativo y aplicativos.
-        Extrae los siguientes datos con máxima precisión y responde estrictamente en formato JSON válido:
-        {
-          "num_servicio": "código o ID numérico del servicio o ticket (ej: 5938086 o 562055)",
-          "fecha": "YYYY-MM-DD (fecha del viaje; si no tiene año asume 2026)",
-          "hora": "HH:MM (formato 24 horas)",
-          "tarifa_base": 0.0,
-          "recargos": 0.0 (sumar recargos como horario especial, cargo reserva, etc.),
-          "peajes": 0.0 (monto de peajes si los hubiere),
-          "asignacion": "Kusi / Directo / Reserva / Inmediato",
-          "categoria": "XL / Van / Lite / Sedán",
-          "metodo_pago": "Empresa / Efectivo / Tarjeta / Yape / Plin",
-          "origen": "punto de partida si figura",
-          "destino": "punto de destino si figura",
-          "comentarios": "cualquier detalle adicional relevante"
-        }
-        Solo devuelve el JSON sin bloques de formato Markdown ni texto extra.
-        """
-        response = model.generate_content([prompt, img])
-        texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(texto_limpio)
-    except Exception as e:
-        st.error(f"Error procesando la imagen con IA: {e}")
-        return None
-
-# ==============================================================================
-# CÁLCULOS TÁCTICOS Y METAS
+# CÁLCULOS TÁCTICOS Y ESTADO SEMANAL
 # ==============================================================================
 ahora = obtener_ahora()
 fecha_op_hoy = calcular_fecha_operativa(ahora)
@@ -215,12 +147,12 @@ suma_preasig = sum(st.session_state.preasignados.values())
 acumulado_con_preasig = acumulado_semana + suma_preasig
 faltante_semana = max(0.0, META_SEMANAL - acumulado_con_preasig)
 
-# Regla de piso eliminatorio
+# Regla de piso diario eliminatorio
 piso_asegurado = total_hoy_hecho >= PISO_DIARIO
 faltante_piso_hoy = max(0.0, PISO_DIARIO - total_hoy_hecho)
 
 # ==============================================================================
-# HERO CARD - COPILOTO TÁCTICO
+# HERO CARD - CONTROL DE METAS
 # ==============================================================================
 st.markdown("### 🚖 Copiloto Táctico de Guardia")
 
@@ -253,7 +185,7 @@ st.markdown(
         <div style="display: flex; justify-content: space-between; font-size: 13px; color: #ffffff;">
             <span><b>Hoy Hecho:</b> S/ {total_hoy_hecho:.2f}</span>
             <span><b>Preasig:</b> S/ {suma_preasig:.2f}</span>
-            <span><b>Hoy Proyectado:</b> S/ {total_hoy_hecho + suma_preasig:.2f}</span>
+            <span><b>Hoy Total:</b> S/ {total_hoy_hecho + suma_preasig:.2f}</span>
         </div>
     </div>
     """,
@@ -263,217 +195,124 @@ st.markdown(
 # ==============================================================================
 # PESTAÑAS PRINCIPALES
 # ==============================================================================
-tab_registro, tab_guardia, tab_historial = st.tabs(["📝 Registrar Viaje", "📊 Guardia & Metas", "📋 Historial"])
+tab_registro, tab_guardia, tab_historial = st.tabs(["📝 Registrar Viaje", "📊 Preasignados", "📋 Historial"])
 
 # ------------------------------------------------------------------------------
 # TAB 1: REGISTRAR VIAJE
 # ------------------------------------------------------------------------------
 with tab_registro:
-    st.markdown("#### Captura o Ticket del Viaje")
-    archivo_foto = st.file_uploader(
-        "Sube o toma una foto del ticket/servicio:", 
-        type=["png", "jpg", "jpeg"],
-        key=f"uploader_{st.session_state.uploader_key}"
-    )
-    
-    if archivo_foto is not None:
-        if st.button("⚡ Extraer Rápido con IA", use_container_width=True):
-            with st.spinner("Leyendo datos del ticket con IA..."):
-                datos_ia = extraer_datos_con_ia(archivo_foto)
-                if datos_ia:
-                    st.session_state.form_datos["num_servicio"] = str(datos_ia.get("num_servicio", "")).strip()
-                    try:
-                        st.session_state.form_datos["fecha"] = datetime.strptime(datos_ia.get("fecha"), "%Y-%m-%d").date()
-                    except Exception:
-                        pass
-                    st.session_state.form_datos["hora"] = str(datos_ia.get("hora", ahora.strftime("%H:%M")))
-                    st.session_state.form_datos["tarifa_base"] = float(datos_ia.get("tarifa_base", 0.0))
-                    st.session_state.form_datos["recargos"] = float(datos_ia.get("recargos", 0.0))
-                    st.session_state.form_datos["peajes"] = float(datos_ia.get("peajes", 0.0))
-                    st.session_state.form_datos["origen"] = str(datos_ia.get("origen", ""))
-                    st.session_state.form_datos["destino"] = str(datos_ia.get("destino", ""))
-                    st.session_state.form_datos["comentarios"] = str(datos_ia.get("comentarios", ""))
-                    
-                    # Normalizar selección de combos
-                    asig_val = str(datos_ia.get("asignacion", "Kusi")).capitalize()
-                    st.session_state.form_datos["asignacion"] = asig_val if asig_val in ["Kusi", "Directo", "Reserva", "Inmediato"] else "Directo"
-                    
-                    pago_val = str(datos_ia.get("metodo_pago", "Empresa"))
-                    st.session_state.form_datos["pago"] = pago_val if pago_val in ["Empresa", "Tarjeta / POS", "Efectivo", "Yape", "Plin"] else "Empresa"
-                    
-                    st.success("¡Datos listos! Revisa abajo y presiona Guardar.")
-
-    st.divider()
-    
-    # Formulario de entrada
     col1, col2 = st.columns(2)
     with col1:
-        inp_num = st.text_input("N° Servicio / Ticket Pasajero *", value=st.session_state.form_datos["num_servicio"])
-        inp_fecha = st.date_input("Fecha", value=st.session_state.form_datos["fecha"])
-        inp_hora = st.text_input("Hora (HH:MM)", value=st.session_state.form_datos["hora"])
-        inp_base = st.number_input("Tarifa Base (S/) *", min_value=0.0, value=float(st.session_state.form_datos["tarifa_base"]), step=5.0, format="%.2f")
-        inp_rec = st.number_input("Recargos (Horario / Reserva) (S/)", min_value=0.0, value=float(st.session_state.form_datos["recargos"]), step=1.0, format="%.2f")
-    
+        num_servicio = st.text_input("N° Servicio / Ticket Pasajero *", key="f_num")
+        fecha_viaje = st.date_input("Fecha", value=ahora.date(), key="f_fecha")
+        hora_viaje = st.text_input("Hora (HH:MM)", value=ahora.strftime("%H:%M"), key="f_hora")
+        tarifa_base = st.number_input("Tarifa Base (S/) *", min_value=0.0, step=5.0, format="%.2f", key="f_base")
+        recargos = st.number_input("Recargos (Horario / Reserva) (S/)", min_value=0.0, step=1.0, format="%.2f", key="f_rec")
+        
     with col2:
-        inp_peajes = st.number_input("Peajes / Reembolsos (S/)", min_value=0.0, value=float(st.session_state.form_datos["peajes"]), step=1.0, format="%.2f")
-        
-        lista_asig = ["Kusi", "Directo", "Reserva", "Inmediato"]
-        idx_asig = lista_asig.index(st.session_state.form_datos["asignacion"]) if st.session_state.form_datos["asignacion"] in lista_asig else 0
-        inp_asig = st.selectbox("Tipo de Asignación", lista_asig, index=idx_asig)
-        
-        lista_cat = ["XL", "Van", "Lite", "Sedán"]
-        idx_cat = lista_cat.index(st.session_state.form_datos["categoria"]) if st.session_state.form_datos["categoria"] in lista_cat else 0
-        inp_cat = st.selectbox("Categoría", lista_cat, index=idx_cat)
-        
-        lista_pago = ["Empresa", "Tarjeta / POS", "Efectivo", "Yape", "Plin"]
-        idx_pago = lista_pago.index(st.session_state.form_datos["pago"]) if st.session_state.form_datos["pago"] in lista_pago else 0
-        inp_pago = st.selectbox("Método de Pago", lista_pago, index=idx_pago)
-        
-        inp_origen = st.text_input("Origen", value=st.session_state.form_datos["origen"])
-        inp_dest = st.text_input("Destino", value=st.session_state.form_datos["destino"])
+        peajes = st.number_input("Peajes / Reembolsos (S/)", min_value=0.0, step=1.0, format="%.2f", key="f_peajes")
+        asignacion = st.selectbox("Tipo de Asignación", ["Kusi", "Directo", "Reserva", "Inmediato"], key="f_asig")
+        categoria = st.selectbox("Categoría", ["XL", "Van", "Lite", "Sedán"], key="f_cat")
+        metodo_pago = st.selectbox("Método de Pago", ["Empresa", "Tarjeta / POS", "Efectivo", "Yape", "Plin"], key="f_pago")
+        origen = st.text_input("Origen", key="f_orig")
+        destino = st.text_input("Destino", key="f_dest")
 
-    inp_coment = st.text_input("Comentarios / Referencia", value=st.session_state.form_datos["comentarios"])
-
-    calc_neta = float(inp_base + inp_rec)
-    calc_total = float(calc_neta + inp_peajes)
+    comentarios = st.text_input("Comentarios / Referencia", key="f_coment")
+    calc_neta = float(tarifa_base + recargos)
+    calc_total = float(calc_neta + peajes)
 
     st.markdown(
         f"""
         <div style="background: rgba(255,255,255,0.06); padding: 10px 14px; border-radius: 8px; margin: 12px 0;">
-            <b>Producción Neta (Meta):</b> <span style="color:#56f5a3; font-size:16px; font-weight:700;">S/ {calc_neta:.2f}</span> | 
+            <b>Producción Neta (Suma a Meta):</b> <span style="color:#56f5a3; font-size:16px; font-weight:700;">S/ {calc_neta:.2f}</span> | 
             <b>Total a Rendir:</b> S/ {calc_total:.2f}
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    # BOTÓN DE GUARDADO ANTIBLOQUEOS
     if st.button("💾 Guardar Viaje", type="primary", use_container_width=True):
-        if not str(inp_num).strip():
+        if not str(num_servicio).strip():
             st.error("⚠️ Debes ingresar el N° de Servicio o Ticket.")
-        elif inp_base <= 0:
+        elif tarifa_base <= 0:
             st.error("⚠️ La Tarifa Base debe ser mayor a S/ 0.00.")
         else:
             try:
-                hora_partes = str(inp_hora).strip().split(":")
-                hh = int(hora_partes[0])
-                mm = int(hora_partes[1])
+                partes = str(hora_viaje).strip().split(":")
+                hh, mm = int(partes[0]), int(partes[1])
             except Exception:
                 hh, mm = ahora.hour, ahora.minute
 
-            dt_viaje = datetime.combine(inp_fecha, datetime.min.time()).replace(hour=hh, minute=mm)
-            f_operativa = calcular_fecha_operativa(dt_viaje)
-            s_operativa = calcular_semana_operativa(f_operativa)
+            dt_viaje = datetime.combine(fecha_viaje, datetime.min.time()).replace(hour=hh, minute=mm)
+            f_op = calcular_fecha_operativa(dt_viaje)
+            s_op = calcular_semana_operativa(f_op)
 
             nuevo_registro = {
-                "id_servicio": str(inp_num).strip(),
+                "id_servicio": str(num_servicio).strip(),
                 "fecha_hora_viaje": dt_viaje.strftime("%Y-%m-%d %H:%M:00"),
-                "fecha_operativa": str(f_operativa),
-                "semana_operativa": str(s_operativa),
-                "tipo_asignacion": str(inp_asig),
-                "tipo_usuario": "Corporativo" if inp_pago == "Empresa" else "Particular",
-                "categoria_servicio": str(inp_cat),
-                "metodo_pago": str(inp_pago),
-                "origen": str(inp_origen).strip(),
-                "destino": str(inp_dest).strip(),
+                "fecha_operativa": str(f_op),
+                "semana_operativa": str(s_op),
+                "tipo_asignacion": str(asignacion),
+                "tipo_usuario": "Corporativo" if metodo_pago == "Empresa" else "Particular",
+                "categoria_servicio": str(categoria),
+                "metodo_pago": str(metodo_pago),
+                "origen": str(origen).strip(),
+                "destino": str(destino).strip(),
                 "distancia_km": 0.0,
                 "duracion_min": 0,
-                "tarifa_base": float(inp_base),
-                "monto_recargos": float(inp_rec),
-                "monto_reembolsos": float(inp_peajes),
+                "tarifa_base": float(tarifa_base),
+                "monto_recargos": float(recargos),
+                "monto_reembolsos": float(peajes),
                 "produccion_neta": float(calc_neta),
                 "monto_total": float(calc_total),
-                "abono_enviado": 1 if inp_pago in ["Efectivo", "Yape", "Plin"] else 0,
+                "abono_enviado": 1 if metodo_pago in ["Efectivo", "Yape", "Plin"] else 0,
                 "fecha_hora_abono": "",
-                "comentarios": str(inp_coment).strip()
+                "comentarios": str(comentarios).strip()
             }
 
-            sincronizado_ok = guardar_viaje_seguro(nuevo_registro)
-
-            # Resetear formulario y cargador de archivos para el siguiente servicio
-            st.session_state.uploader_key += 1
-            st.session_state.form_datos = {
-                "num_servicio": "",
-                "fecha": ahora.date(),
-                "hora": ahora.strftime("%H:%M"),
-                "tarifa_base": 0.0,
-                "recargos": 0.0,
-                "peajes": 0.0,
-                "asignacion": "Kusi",
-                "categoria": "XL",
-                "pago": "Empresa",
-                "origen": "",
-                "destino": "",
-                "comentarios": ""
-            }
-
-            if sincronizado_ok:
-                st.success(f"✅ ¡Viaje {inp_num} guardado y sincronizado con Google Sheets!")
+            ok_sync = guardar_viaje_seguro(nuevo_registro)
+            if ok_sync:
+                st.success(f"✅ ¡Viaje {num_servicio} guardado y sincronizado!")
             else:
-                st.success(f"✅ ¡Viaje {inp_num} guardado en el teléfono! (Quedó respaldado en memoria).")
-
+                st.success(f"✅ ¡Viaje {num_servicio} guardado en el teléfono!")
             st.rerun()
 
 # ------------------------------------------------------------------------------
-# TAB 2: GUARDIA & METAS (PREASIGNADOS)
+# TAB 2: PREASIGNADOS
 # ------------------------------------------------------------------------------
 with tab_guardia:
     st.subheader("Control de Preasignados de la Guardia")
-    st.caption("Anota aquí los servicios que tienes asignados antes de cobrarlos para proyectar tu piso.")
-
-    col_p1, col_p2, col_p3 = st.columns(3)
-    with col_p1:
-        st.session_state.preasignados["pre1"] = st.number_input(
-            "Preasignado 1 (S/)", 
-            value=float(st.session_state.preasignados.get("pre1", 0.0)), 
-            step=10.0, 
-            format="%.2f"
-        )
-    with col_p2:
-        st.session_state.preasignados["pre2"] = st.number_input(
-            "Preasignado 2 (S/)", 
-            value=float(st.session_state.preasignados.get("pre2", 0.0)), 
-            step=10.0, 
-            format="%.2f"
-        )
-    with col_p3:
-        st.session_state.preasignados["pre3"] = st.number_input(
-            "Preasignado 3 (S/)", 
-            value=float(st.session_state.preasignados.get("pre3", 0.0)), 
-            step=10.0, 
-            format="%.2f"
-        )
-
+    st.caption("Anota los viajes preasignados para saber cuánto te falta para el piso diario.")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.session_state.preasignados["pre1"] = st.number_input("Preasignado 1 (S/)", value=float(st.session_state.preasignados.get("pre1", 0.0)), step=10.0, format="%.2f")
+    with c2:
+        st.session_state.preasignados["pre2"] = st.number_input("Preasignado 2 (S/)", value=float(st.session_state.preasignados.get("pre2", 0.0)), step=10.0, format="%.2f")
+    with c3:
+        st.session_state.preasignados["pre3"] = st.number_input("Preasignado 3 (S/)", value=float(st.session_state.preasignados.get("pre3", 0.0)), step=10.0, format="%.2f")
     st.info(f"Total Proyectado en Preasignados: **S/ {sum(st.session_state.preasignados.values()):.2f}**")
 
 # ------------------------------------------------------------------------------
-# TAB 3: HISTORIAL DE SERVICIOS
+# TAB 3: HISTORIAL
 # ------------------------------------------------------------------------------
 with tab_historial:
     st.subheader("Servicios Registrados")
-
-    c_btn1, c_btn2 = st.columns(2)
-    with c_btn1:
-        if st.button("🔄 Forzar Sincronización Nube", use_container_width=True):
-            st.session_state.viajes = sincronizar_desde_nube()
-            st.rerun()
+    if st.button("🔄 Forzar Sincronización Nube", use_container_width=True):
+        st.session_state.viajes = sincronizar_desde_nube()
+        st.rerun()
 
     if not df_todos.empty:
         columnas_ver = ["id_servicio", "fecha_operativa", "produccion_neta", "tarifa_base", "metodo_pago", "destino", "comentarios"]
         cols_presentes = [c for c in columnas_ver if c in df_todos.columns]
-        
-        df_mostrar = df_todos[cols_presentes].iloc[::-1]
-        st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
-
+        st.dataframe(df_todos[cols_presentes].iloc[::-1], use_container_width=True, hide_index=True)
         st.divider()
-        st.markdown("#### 🗑️ Eliminar un registro erróneo")
+        st.markdown("#### 🗑️ Eliminar un registro")
         lista_ids = [str(x) for x in df_todos["id_servicio"].tolist() if str(x).strip()]
-        id_a_borrar = st.selectbox("Selecciona ID a eliminar:", options=["-- Ninguno --"] + lista_ids[::-1])
-
-        if id_a_borrar != "-- Ninguno --":
-            if st.button(f"❌ Confirmar Eliminación de {id_a_borrar}", type="secondary"):
-                eliminar_viaje_seguro(id_a_borrar)
-                st.warning(f"Servicio {id_a_borrar} eliminado.")
+        id_borrar = st.selectbox("Selecciona ID a eliminar:", options=["-- Ninguno --"] + lista_ids[::-1])
+        if id_borrar != "-- Ninguno --":
+            if st.button(f"❌ Confirmar Eliminación de {id_borrar}", type="secondary"):
+                eliminar_viaje_seguro(id_borrar)
+                st.warning(f"Servicio {id_borrar} eliminado.")
                 st.rerun()
     else:
-        st.info("No hay servicios registrados en la base de datos.")
+        st.info("No hay servicios registrados.")
