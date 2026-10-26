@@ -35,11 +35,7 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY
 if GEMINI_API_KEY and genai is not None:
     genai.configure(api_key=GEMINI_API_KEY)
 
-GSHEETS_URL = st.secrets.get(
-    "GSHEETS_URL", 
-    os.environ.get("GSHEETS_URL", "https://script.google.com/macros/s/AKfycbz_tu_script_id_aqui/exec")
-)
-
+GSHEETS_URL = "https://script.google.com/macros/s/AKfycbzbnRBVGJC3AhvoM1gbE7V1p6we8DxpfRyhQfxP0zIJ1G9xCG1YOA6TLtrOwfHh588/exec"
 LOCAL_CACHE_FILE = "viajes_cache.json"
 
 META_SEMANAL = 2250.00
