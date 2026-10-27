@@ -214,7 +214,10 @@ semana_seleccionada = st.selectbox("", semanas_disponibles, index=0, label_visib
 
 if not df_all.empty:
     df_semana = df_all[df_all["semana_operativa"] == semana_seleccionada]
-    df_hoy = df_all[df_all["fecha_operativa"] == str(fecha_op_hoy)]
+    # CÓDIGO CORREGIDO:
+fecha_hoy_str = str(fecha_op_hoy)[:10]
+df_hoy = df_todos[df_todos["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
+
 else:
     df_semana = pd.DataFrame()
     df_hoy = pd.DataFrame()
