@@ -278,33 +278,6 @@ else:
 
 txt_piso_hoy = "Piso Hoy: ✅ ASEGURADO" if produccion_guardia >= PISO_DIARIO else f"Piso Hoy: 🚨 EN RIESGO (Falta S/ {max(0.0, PISO_DIARIO - produccion_guardia):.2f})"
 
-st.markdown(
-    f"""
-    <div style="background-color: {bg_card}; padding: 16px; border-radius: 12px; border: 2px solid {border_card}; margin-bottom: 14px;">
-        <div style="font-size: 13px; font-weight: 700; color: {badge_color}; margin-bottom: 6px;">
-            🚖 GUARDIA EN CURSO | {estado_meta_txt}
-        </div>
-        <div style="font-size: 26px; font-weight: 800; color: #ffffff; margin-bottom: 2px;">
-            S/ {acumulado_con_preasig:.2f} <span style="font-size: 15px; font-weight: 500; color: #e0e0e0;">de S/ {META_SEMANAL:.0f} (Bono {BONO_MONTO:.0f})</span>
-        </div>
-        <div style="font-size: 12px; color: {badge_color}; margin-bottom: 8px;">
-            Pendiente semanal: S/ {faltante_semana:.2f} ({porcentaje_avance:.1f}% avance) | Día {dia_ciclo} (Hito: S/ {hito_hoy:.0f})
-        </div>
-        <div style="font-size: 13px; color: #ffffff; margin-bottom: 4px;">
-            Hoy Hecho: S/ {total_hoy_hecho:.2f} | Preasig: S/ {suma_preasig:.2f} | Total Hoy Proyectado: <b>S/ {produccion_guardia:.2f}</b>
-        </div>
-        <div style="font-size: 12px; font-weight: 600; color: #ffffff;">
-            {txt_piso_hoy} | Objetivo Diario Óptimo: S/ {META_DIARIA_TOP:.2f}
-        </div>
-        <div style="background: rgba(0,0,0,0.3); padding: 8px 10px; border-radius: 6px; margin-top: 10px; font-size: 11px; color: #ffe082;">
-            🎯 <b>Escala 5x2:</b> D1 S/ 450 | D2 S/ 900 | D3 S/ 1,350 | D4 S/ 1,800 | D5 S/ 2,250
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-
 
 # ==============================================================================
 # HERO CARD TÁCTICA - HITOS DIARIOS (1: 450, 2: 900, 3: 1350, 4: 1800, 5: 2250)
