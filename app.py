@@ -314,14 +314,20 @@ PISO_DIARIO = 300.00
 
 # Filtro limpio de fecha para que "Hoy Hecho" tome los S/ 104.00 reales
 fecha_hoy_str = str(fecha_op_hoy)[:10]
-if not df_todos.empty and "fecha_operativa" in df_todos.columns:
-    df_hoy = df_todos[df_todos["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
-    total_hoy_hecho = df_hoy["produccion_neta"].sum() if not df_hoy.empty else 0.0
+
+# LÍNEA CORREGIDA:
+if not df_all.empty and "fecha_operativa" in df_all.columns:
+    df_hoy = df_all[df_all["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
+    total_hoy_hecho = float(df_hoy["produccion_neta"].sum()) if not df_hoy.empty else 0.0
 else:
+    df_hoy = pd.DataFrame()
     total_hoy_hecho = 0.0
+
 
 # Producción total de la guardia en curso (hecho hoy + preasignados)
 produccion_guardia = total_hoy_hecho + suma_preasig
+
+
 
 # Hitos progresivos del ciclo 5x2
 HITOS_ACUMULADOS = {
