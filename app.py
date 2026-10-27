@@ -234,15 +234,20 @@ piso_asegurado = total_hoy_hecho >= PISO_DIARIO
 faltante_piso_hoy = max(0.0, PISO_DIARIO - total_hoy_hecho)
 
 # ==============================================================================
-# HERO CARD ORIGINAL
-# ==============================================================================
-# ==============================================================================
 # HERO CARD TÁCTICA - HITOS DIARIOS (1: 450, 2: 900, 3: 1350, 4: 1800, 5: 2250)
 # ==============================================================================
 META_DIARIA_TOP = 450.00
 PISO_DIARIO = 300.00
 
-# Producción total de la guardia en curso (hecho hoy + preasignados ingresados)
+# Filtro limpio de fecha para que "Hoy Hecho" tome los S/ 104.00 reales
+fecha_hoy_str = str(fecha_op_hoy)[:10]
+if not df_todos.empty and "fecha_operativa" in df_todos.columns:
+    df_hoy = df_todos[df_todos["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
+    total_hoy_hecho = df_hoy["produccion_neta"].sum() if not df_hoy.empty else 0.0
+else:
+    total_hoy_hecho = 0.0
+
+# Producción total de la guardia en curso (hecho hoy + preasignados)
 produccion_guardia = total_hoy_hecho + suma_preasig
 
 # Hitos progresivos del ciclo 5x2
@@ -254,12 +259,10 @@ HITOS_ACUMULADOS = {
     5: 2250.00
 }
 
-# Determinar día del ciclo operativo (1 al 5)
 dia_ciclo = min(5, max(1, fecha_op_hoy.isoweekday()))
 hito_hoy = HITOS_ACUMULADOS.get(dia_ciclo, 2250.00)
 
-# Evaluación semafórica:
-# 1. 🟢 VERDE: S/ 450+ en el día, o acumulado igual/mayor al hito del día, o semana completada
+# Semáforo: Verde / Ámbar / Rojo sin errores de sintaxis
 if (produccion_guardia >= META_DIARIA_TOP) or (acumulado_con_preasig >= hito_hoy) or (acumulado_con_preasig >= META_SEMANAL):
     bg_card = "#103820"
     border_card = "#2e7d32"
@@ -267,17 +270,15 @@ if (produccion_guardia >= META_DIARIA_TOP) or (acumulado_con_preasig >= hito_hoy
     if acumulado_con_preasig >= META_SEMANAL:
         estado_meta_txt = "🟢 META SEMANAL CUBIERTA"
     elif acumulado_con_preasig >= hito_hoy and produccion_guardia < META_DIARIA_TOP:
-        estado_meta_txt = f"🟢 RITMO TOP (Supera hito acumulado Día {dia_ciclo}: S/ {hito_hoy:.0f})"
+        estado_meta_txt = f"🟢 RITMO TOP (Supera hito Día {dia_ciclo}: S/ {hito_hoy:.0f})"
     else:
         estado_meta_txt = "🟢 META DIARIA CUMPLIDA (S/ 450+)"
-# 2. 🟡 ÁMBAR: Superó el piso de S/ 300 pero no llega a S/ 450 ni al hito acumulado
 elif produccion_guardia >= PISO_DIARIO:
     bg_card = "#3d2b05"
     border_card = "#f57f17"
     badge_color = "#ffd54f"
     falta_top = META_DIARIA_TOP - produccion_guardia
     estado_meta_txt = f"🟡 PISO CUMPLIDO (Falta S/ {falta_top:.2f} para S/ 450)"
-# 3. 🔴 ROJO: Por debajo del piso obligatorio de S/ 300
 else:
     bg_card = "#3b1111"
     border_card = "#c62828"
@@ -312,7 +313,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
 
 
 
