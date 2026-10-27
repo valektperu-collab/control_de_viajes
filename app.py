@@ -472,12 +472,15 @@ with tab_reg:
                 st.rerun()
 
 # ------------------------------------------------------------------------------
-# PESTAÑA 2: ABONOS
+# PESTAÑA 2: ABONOS (CON FORMATO RÁPIDO PARA COPIAR: SERVICIO - MÓVIL)
 # ------------------------------------------------------------------------------
 with tab_abonos:
     st.subheader("💵 Control de Abonos y Cobranzas en Ruta")
-    st.caption("Seguimiento del dinero en efectivo y billeteras digitales (Yape/Plin) a rendir.")
+    st.caption("Seguimiento de efectivo/billeteras y generación de texto para constancia de abono.")
     
+    # Número de móvil predeterminado (puedes editarlo o dejarlo fijo)
+    NUMERO_MOVIL_DEFAULT = "2986"
+
     if not df_all.empty:
         df_cobranzas = df_all[df_all["metodo_pago"].isin(["Efectivo", "Yape", "Plin"])].copy()
         if not df_cobranzas.empty:
@@ -489,6 +492,29 @@ with tab_abonos:
             c_ab1.metric("Total Cobrado en Mano", f"S/ {total_cobrado_mano:.2f}")
             c_ab2.metric("Total Rendido / Abonado", f"S/ {total_abonado:.2f}")
             c_ab3.metric("Saldo por Rendir", f"S/ {saldo_pendiente:.2f}")
+
+            st.divider()
+
+            # --- BLOQUE DE COPIA RÁPIDA: SERVICIO - MÓVIL ---
+            st.markdown("##### 📋 Copiar Formato de Abono (Servicio - Móvil)")
+            col_sel_serv, col_movil = st.columns([2, 1])
+            
+            with col_sel_serv:
+                lista_pendientes = df_cobranzas[df_cobranzas["abono_enviado"] == 0]["id_servicio"].dropna().astype(str).tolist()
+                lista_opciones = lista_pendientes if lista_pendientes else df_cobranzas["id_servicio"].dropna().astype(str).tolist()
+                servicio_sel = st.selectbox("Selecciona Servicio a Abonar:", lista_opciones, index=0)
+            
+            with col_movil:
+                nro_movil = st.text_input("N° Móvil:", value=NUMERO_MOVIL_DEFAULT)
+
+            if servicio_sel:
+                texto_abono = f"{servicio_sel.strip()} - {nro_movil.strip()}"
+                st.markdown("**Texto generado para comprobante:**")
+                # st.code muestra el botón nativo de copia al portapapeles en Streamlit
+                st.code(texto_abono, language="text")
+                st.caption("👉 Toca el icono de copiar a la derecha del cuadro para pegarlo directamente en Yape/Plin/Transferencia.")
+            
+            st.divider()
             
             st.markdown("##### Detalle de Servicios con Cobro Directo")
             cols_ab = ["id_servicio", "fecha_operativa", "metodo_pago", "monto_total", "abono_enviado"]
@@ -497,6 +523,8 @@ with tab_abonos:
             st.info("No hay servicios cobrados en Efectivo o Billeteras Digitales registrados.")
     else:
         st.info("Sin registros de servicios.")
+
+
 
 # ------------------------------------------------------------------------------
 # PESTAÑA 3: GUARDIA & METAS (PREASIGNADOS)
