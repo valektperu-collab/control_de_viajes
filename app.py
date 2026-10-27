@@ -187,12 +187,17 @@ if "form_datos" not in st.session_state:
     }
 
 # ==============================================================================
-# CARGA DE DATOS Y SELECTOR DE SEMANA
+# CARGA DE DATOS, SELECTOR DE SEMANA Y FILTRADO DIARIO
 # ==============================================================================
 fecha_op_hoy = calcular_fecha_operativa(ahora_pe)
 semana_op_hoy = obtener_semana_operativa(fecha_op_hoy)
+fecha_hoy_str = str(fecha_op_hoy)[:10]
 
-df_all = pd.DataFrame(st.session_state.viajes) if st.session_state.viajes else cargar_viajes()
+# Asegurar DataFrame base
+if "viajes" in st.session_state and st.session_state.viajes:
+    df_all = pd.DataFrame(st.session_state.viajes)
+else:
+    df_all = cargar_viajes()
 
 if not df_all.empty:
     for col in ["produccion_neta", "tarifa_base", "monto_recargos", "monto_reembolsos", "monto_total", "abono_enviado"]:
@@ -201,8 +206,8 @@ if not df_all.empty:
     if "semana_operativa" not in df_all.columns:
         df_all["semana_operativa"] = semana_op_hoy
     if "fecha_operativa" not in df_all.columns:
-        df_all["fecha_operativa"] = str(fecha_op_hoy)
-    
+        df_all["fecha_operativa"] = fecha_hoy_str
+
     semanas_disponibles = sorted([str(s) for s in df_all["semana_operativa"].dropna().unique().tolist()], reverse=True)
     if semana_op_hoy not in semanas_disponibles:
         semanas_disponibles.insert(0, semana_op_hoy)
@@ -212,26 +217,94 @@ else:
 st.markdown("#### Semana Operativa")
 semana_seleccionada = st.selectbox("", semanas_disponibles, index=0, label_visibility="collapsed")
 
-if not df_all.empty:
+# Filtrado por semana seleccionada
+if not df_all.empty and "semana_operativa" in df_all.columns:
     df_semana = df_all[df_all["semana_operativa"] == semana_seleccionada]
-    # CÓDIGO CORREGIDO:
-fecha_hoy_str = str(fecha_op_hoy)[:10]
-df_hoy = df_todos[df_todos["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
-
+    acumulado_semana = float(df_semana["produccion_neta"].sum()) if not df_semana.empty else 0.0
 else:
-    df_semana = pd.DataFrame()
-    df_hoy = pd.DataFrame()
+    acumulado_semana = 0.0
 
-acumulado_semana = df_semana["produccion_neta"].sum() if not df_semana.empty else 0.0
-total_hoy_hecho = df_hoy["produccion_neta"].sum() if not df_hoy.empty else 0.0
+# Filtrado seguro por fecha de hoy (toma los 10 primeros caracteres YYYY-MM-DD)
+if not df_all.empty and "fecha_operativa" in df_all.columns:
+    df_hoy = df_all[df_all["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
+    total_hoy_hecho = float(df_hoy["produccion_neta"].sum()) if not df_hoy.empty else 0.0
+else:
+    total_hoy_hecho = 0.0
 
-suma_preasig = sum(st.session_state.preasignados.values())
+suma_preasig = sum(st.session_state.preasignados.values()) if "preasignados" in st.session_state else 0.0
 acumulado_con_preasig = acumulado_semana + suma_preasig
 faltante_semana = max(0.0, META_SEMANAL - acumulado_con_preasig)
 porcentaje_avance = min(100.0, (acumulado_con_preasig / META_SEMANAL) * 100.0) if META_SEMANAL > 0 else 0.0
 
-piso_asegurado = total_hoy_hecho >= PISO_DIARIO
-faltante_piso_hoy = max(0.0, PISO_DIARIO - total_hoy_hecho)
+META_DIARIA_TOP = 450.00
+PISO_DIARIO = 300.00
+produccion_guardia = total_hoy_hecho + suma_preasig
+
+# Hitos del ciclo 5x2
+HITOS_ACUMULADOS = {
+    1: 450.00,
+    2: 900.00,
+    3: 1350.00,
+    4: 1800.00,
+    5: 2250.00
+}
+
+dia_ciclo = min(5, max(1, fecha_op_hoy.isoweekday()))
+hito_hoy = HITOS_ACUMULADOS.get(dia_ciclo, 2250.00)
+
+# Semáforo de la Hero Card
+if (produccion_guardia >= META_DIARIA_TOP) or (acumulado_con_preasig >= hito_hoy) or (acumulado_con_preasig >= META_SEMANAL):
+    bg_card = "#103820"
+    border_card = "#2e7d32"
+    badge_color = "#81c784"
+    if acumulado_con_preasig >= META_SEMANAL:
+        estado_meta_txt = "🟢 META SEMANAL CUBIERTA"
+    elif acumulado_con_preasig >= hito_hoy and produccion_guardia < META_DIARIA_TOP:
+        estado_meta_txt = f"🟢 RITMO TOP (Supera hito Día {dia_ciclo}: S/ {hito_hoy:.0f})"
+    else:
+        estado_meta_txt = "🟢 META DIARIA CUMPLIDA (S/ 450+)"
+elif produccion_guardia >= PISO_DIARIO:
+    bg_card = "#3d2b05"
+    border_card = "#f57f17"
+    badge_color = "#ffd54f"
+    falta_top = META_DIARIA_TOP - produccion_guardia
+    estado_meta_txt = f"🟡 PISO CUMPLIDO (Falta S/ {falta_top:.2f} para S/ 450)"
+else:
+    bg_card = "#3b1111"
+    border_card = "#c62828"
+    badge_color = "#ef9a9a"
+    falta_piso = PISO_DIARIO - produccion_guardia
+    estado_meta_txt = f"🔴 PISO EN RIESGO (Falta S/ {falta_piso:.2f} para S/ 300)"
+
+txt_piso_hoy = "Piso Hoy: ✅ ASEGURADO" if produccion_guardia >= PISO_DIARIO else f"Piso Hoy: 🚨 EN RIESGO (Falta S/ {max(0.0, PISO_DIARIO - produccion_guardia):.2f})"
+
+st.markdown(
+    f"""
+    <div style="background-color: {bg_card}; padding: 16px; border-radius: 12px; border: 2px solid {border_card}; margin-bottom: 14px;">
+        <div style="font-size: 13px; font-weight: 700; color: {badge_color}; margin-bottom: 6px;">
+            🚖 GUARDIA EN CURSO | {estado_meta_txt}
+        </div>
+        <div style="font-size: 26px; font-weight: 800; color: #ffffff; margin-bottom: 2px;">
+            S/ {acumulado_con_preasig:.2f} <span style="font-size: 15px; font-weight: 500; color: #e0e0e0;">de S/ {META_SEMANAL:.0f} (Bono {BONO_MONTO:.0f})</span>
+        </div>
+        <div style="font-size: 12px; color: {badge_color}; margin-bottom: 8px;">
+            Pendiente semanal: S/ {faltante_semana:.2f} ({porcentaje_avance:.1f}% avance) | Día {dia_ciclo} (Hito: S/ {hito_hoy:.0f})
+        </div>
+        <div style="font-size: 13px; color: #ffffff; margin-bottom: 4px;">
+            Hoy Hecho: S/ {total_hoy_hecho:.2f} | Preasig: S/ {suma_preasig:.2f} | Total Hoy Proyectado: <b>S/ {produccion_guardia:.2f}</b>
+        </div>
+        <div style="font-size: 12px; font-weight: 600; color: #ffffff;">
+            {txt_piso_hoy} | Objetivo Diario Óptimo: S/ {META_DIARIA_TOP:.2f}
+        </div>
+        <div style="background: rgba(0,0,0,0.3); padding: 8px 10px; border-radius: 6px; margin-top: 10px; font-size: 11px; color: #ffe082;">
+            🎯 <b>Escala 5x2:</b> D1 S/ 450 | D2 S/ 900 | D3 S/ 1,350 | D4 S/ 1,800 | D5 S/ 2,250
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+
 
 # ==============================================================================
 # HERO CARD TÁCTICA - HITOS DIARIOS (1: 450, 2: 900, 3: 1350, 4: 1800, 5: 2250)
