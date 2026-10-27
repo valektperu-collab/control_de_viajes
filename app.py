@@ -3,8 +3,9 @@ import pandas as pd
 import requests
 import json
 import os
+import io
 from datetime import datetime, date, timedelta, timezone
-from PIL import Image
+from PIL import Image, ImageOps
 
 # Importación segura de IA para evitar caídas de servidor
 try:
@@ -41,14 +42,19 @@ LOCAL_CACHE_FILE = "viajes_cache.json"
 META_SEMANAL = 2250.00
 BONO_MONTO = 100.00
 PISO_DIARIO = 300.00
-HORA_CORTE_NOCTURNO = 5  # 05:00 a. m.
+META_DIARIA_TOP = 450.00
+HORA_CORTE_GUARDIA = 17  # 17:00 (5:00 p. m.): inicio formal de la nueva guardia
 
 # ==============================================================================
 # GESTIÓN DE TIEMPO Y PERSISTENCIA (OFFLINE FIRST)
 # ==============================================================================
 def calcular_fecha_operativa(dt_obj):
-    """Regla de corte nocturno: antes de las 5 a. m. pertenece al día anterior."""
-    if dt_obj.hour < HORA_CORTE_NOCTURNO:
+    """
+    Regla de turno nocturno:
+    Antes de las 17:00 (5:00 p. m.) sigue perteneciendo a la guardia iniciada la tarde anterior.
+    A las 17:00 en punto arranca formalmente la nueva guardia.
+    """
+    if dt_obj.hour < HORA_CORTE_GUARDIA:
         return (dt_obj - timedelta(days=1)).date()
     return dt_obj.date()
 
@@ -88,7 +94,7 @@ def cargar_viajes():
     return pd.DataFrame(local) if local else pd.DataFrame()
 
 def guardar_viaje_remoto(dict_item):
-    """Guarda en 0.1s en memoria local y sincroniza en segundo plano sin congelar."""
+    """Guarda en memoria local y sincroniza en segundo plano sin congelar la app."""
     if "viajes" not in st.session_state:
         st.session_state.viajes = []
     
@@ -119,20 +125,35 @@ def eliminar_viaje_remoto(id_servicio):
         pass
 
 # ==============================================================================
-# EXTRACCIÓN OCR CON INTELIGENCIA ARTIFICIAL (GEMINI VISION)
+# EXTRACCIÓN OCR CON INTELIGENCIA ARTIFICIAL (OPTIMIZADA)
 # ==============================================================================
+def optimizar_imagen(imagen_file):
+    """Reorienta y redimensiona la captura a un tamaño ligero para subida ultra rápida."""
+    img = Image.open(imagen_file)
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    
+    max_ancho = 1024
+    if img.width > max_ancho:
+        proporcion = max_ancho / float(img.width)
+        alto_calc = int(float(img.height) * float(proporcion))
+        img = img.resize((max_ancho, alto_calc), Image.Resampling.LANCZOS)
+    
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=85, optimize=True)
+    buffer.seek(0)
+    return Image.open(buffer)
+
 def extraer_datos_con_ia(imagen_file):
     if not GEMINI_API_KEY or genai is None:
         st.error("⚠️ Configura GEMINI_API_KEY en Secrets para habilitar la extracción por IA.")
         return None
     try:
-        img = Image.open(imagen_file)
-        
-        # Modelo oficial Gemini 3.8 Flash
-        model = genai.GenerativeModel("gemini-3.8-flash")
+        img_optimizada = optimizar_imagen(imagen_file)
         
         prompt = """
-        Eres un asistente experto analizando tickets y capturas de viajes de taxi corporativo y aplicativos.
+        Eres un asistente experto analizando tickets y capturas de viajes de taxi corporativo y aplicativos en Perú.
         Extrae los siguientes datos con máxima precisión y responde estrictamente en formato JSON válido:
         {
           "num_servicio": "código o ID numérico del servicio o ticket (ej: 5938086 o 562055)",
@@ -148,15 +169,30 @@ def extraer_datos_con_ia(imagen_file):
           "destino": "punto de destino si figura",
           "comentarios": "información relevante adicional"
         }
-        Solo devuelve el JSON sin bloques Markdown adicionales.
+        Solo devuelve el JSON sin bloques Markdown adicionales ni explicaciones.
         """
-        response = model.generate_content([prompt, img])
+        
+        modelos = ["gemini-3.8-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-2.0-flash"]
+        response = None
+        for nombre_mod in modelos:
+            try:
+                model = genai.GenerativeModel(nombre_mod)
+                response = model.generate_content([prompt, img_optimizada])
+                if response and response.text:
+                    break
+            except Exception:
+                continue
+                
+        if not response or not response.text:
+            st.error("No se pudo obtener respuesta del modelo de visión.")
+            return None
+
         texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(texto_limpio)
     except Exception as e:
         st.error(f"Error procesando imagen: {e}")
         return None
-        
+
 # ==============================================================================
 # ESTADO DE SESIÓN
 # ==============================================================================
@@ -193,7 +229,6 @@ fecha_op_hoy = calcular_fecha_operativa(ahora_pe)
 semana_op_hoy = obtener_semana_operativa(fecha_op_hoy)
 fecha_hoy_str = str(fecha_op_hoy)[:10]
 
-# Asegurar DataFrame base
 if "viajes" in st.session_state and st.session_state.viajes:
     df_all = pd.DataFrame(st.session_state.viajes)
 else:
@@ -224,71 +259,7 @@ if not df_all.empty and "semana_operativa" in df_all.columns:
 else:
     acumulado_semana = 0.0
 
-# Filtrado seguro por fecha de hoy (toma los 10 primeros caracteres YYYY-MM-DD)
-if not df_all.empty and "fecha_operativa" in df_all.columns:
-    df_hoy = df_all[df_all["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
-    total_hoy_hecho = float(df_hoy["produccion_neta"].sum()) if not df_hoy.empty else 0.0
-else:
-    total_hoy_hecho = 0.0
-
-suma_preasig = sum(st.session_state.preasignados.values()) if "preasignados" in st.session_state else 0.0
-acumulado_con_preasig = acumulado_semana + suma_preasig
-faltante_semana = max(0.0, META_SEMANAL - acumulado_con_preasig)
-porcentaje_avance = min(100.0, (acumulado_con_preasig / META_SEMANAL) * 100.0) if META_SEMANAL > 0 else 0.0
-
-META_DIARIA_TOP = 450.00
-PISO_DIARIO = 300.00
-produccion_guardia = total_hoy_hecho + suma_preasig
-
-# Hitos del ciclo 5x2
-HITOS_ACUMULADOS = {
-    1: 450.00,
-    2: 900.00,
-    3: 1350.00,
-    4: 1800.00,
-    5: 2250.00
-}
-
-dia_ciclo = min(5, max(1, fecha_op_hoy.isoweekday()))
-hito_hoy = HITOS_ACUMULADOS.get(dia_ciclo, 2250.00)
-
-# Semáforo de la Hero Card
-if (produccion_guardia >= META_DIARIA_TOP) or (acumulado_con_preasig >= hito_hoy) or (acumulado_con_preasig >= META_SEMANAL):
-    bg_card = "#103820"
-    border_card = "#2e7d32"
-    badge_color = "#81c784"
-    if acumulado_con_preasig >= META_SEMANAL:
-        estado_meta_txt = "🟢 META SEMANAL CUBIERTA"
-    elif acumulado_con_preasig >= hito_hoy and produccion_guardia < META_DIARIA_TOP:
-        estado_meta_txt = f"🟢 RITMO TOP (Supera hito Día {dia_ciclo}: S/ {hito_hoy:.0f})"
-    else:
-        estado_meta_txt = "🟢 META DIARIA CUMPLIDA (S/ 450+)"
-elif produccion_guardia >= PISO_DIARIO:
-    bg_card = "#3d2b05"
-    border_card = "#f57f17"
-    badge_color = "#ffd54f"
-    falta_top = META_DIARIA_TOP - produccion_guardia
-    estado_meta_txt = f"🟡 PISO CUMPLIDO (Falta S/ {falta_top:.2f} para S/ 450)"
-else:
-    bg_card = "#3b1111"
-    border_card = "#c62828"
-    badge_color = "#ef9a9a"
-    falta_piso = PISO_DIARIO - produccion_guardia
-    estado_meta_txt = f"🔴 PISO EN RIESGO (Falta S/ {falta_piso:.2f} para S/ 300)"
-
-txt_piso_hoy = "Piso Hoy: ✅ ASEGURADO" if produccion_guardia >= PISO_DIARIO else f"Piso Hoy: 🚨 EN RIESGO (Falta S/ {max(0.0, PISO_DIARIO - produccion_guardia):.2f})"
-
-
-# ==============================================================================
-# HERO CARD TÁCTICA - HITOS DIARIOS (1: 450, 2: 900, 3: 1350, 4: 1800, 5: 2250)
-# ==============================================================================
-META_DIARIA_TOP = 450.00
-PISO_DIARIO = 300.00
-
-# Filtro limpio de fecha para que "Hoy Hecho" tome los S/ 104.00 reales
-fecha_hoy_str = str(fecha_op_hoy)[:10]
-
-# LÍNEA CORREGIDA:
+# Filtrado limpio de la fecha operativa actual (los 10 primeros caracteres YYYY-MM-DD)
 if not df_all.empty and "fecha_operativa" in df_all.columns:
     df_hoy = df_all[df_all["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
     total_hoy_hecho = float(df_hoy["produccion_neta"].sum()) if not df_hoy.empty else 0.0
@@ -296,13 +267,14 @@ else:
     df_hoy = pd.DataFrame()
     total_hoy_hecho = 0.0
 
+suma_preasig = sum(st.session_state.preasignados.values()) if "preasignados" in st.session_state else 0.0
+acumulado_con_preasig = acumulado_semana + suma_preasig
+faltante_semana = max(0.0, META_SEMANAL - acumulado_con_preasig)
+porcentaje_avance = min(100.0, (acumulado_con_preasig / META_SEMANAL) * 100.0) if META_SEMANAL > 0 else 0.0
 
-# Producción total de la guardia en curso (hecho hoy + preasignados)
 produccion_guardia = total_hoy_hecho + suma_preasig
 
-
-
-# Hitos progresivos del ciclo 5x2
+# Hitos del ciclo 5x2 (1: 450, 2: 900, 3: 1350, 4: 1800, 5: 2250)
 HITOS_ACUMULADOS = {
     1: 450.00,
     2: 900.00,
@@ -314,7 +286,9 @@ HITOS_ACUMULADOS = {
 dia_ciclo = min(5, max(1, fecha_op_hoy.isoweekday()))
 hito_hoy = HITOS_ACUMULADOS.get(dia_ciclo, 2250.00)
 
-# Semáforo: Verde / Ámbar / Rojo sin errores de sintaxis
+# ==============================================================================
+# HERO CARD TÁCTICA - SEMÁFORO DIARIO Y RITMO 5x2 (ÚNICA INSTANCIA)
+# ==============================================================================
 if (produccion_guardia >= META_DIARIA_TOP) or (acumulado_con_preasig >= hito_hoy) or (acumulado_con_preasig >= META_SEMANAL):
     bg_card = "#103820"
     border_card = "#2e7d32"
@@ -330,7 +304,7 @@ elif produccion_guardia >= PISO_DIARIO:
     border_card = "#f57f17"
     badge_color = "#ffd54f"
     falta_top = META_DIARIA_TOP - produccion_guardia
-    estado_meta_txt = f"🟡 PISO CUMPLIDO (Falta S/ {falta_top:.2f} para S/ 450)"
+    estado_meta_txt = f"🟡 PISO ASEGURADO (Falta S/ {falta_top:.2f} para S/ 450)"
 else:
     bg_card = "#3b1111"
     border_card = "#c62828"
@@ -338,7 +312,7 @@ else:
     falta_piso = PISO_DIARIO - produccion_guardia
     estado_meta_txt = f"🔴 PISO EN RIESGO (Falta S/ {falta_piso:.2f} para S/ 300)"
 
-txt_piso_hoy = "Piso Hoy: ✅ ASEGURADO" if produccion_guardia >= PISO_DIARIO else f"Piso Hoy: 🚨 EN RIESGO (Falta S/ {max(0.0, PISO_DIARIO - produccion_guardia):.2f})"
+txt_piso_hoy = "Piso Guardia: ✅ ASEGURADO" if produccion_guardia >= PISO_DIARIO else f"Piso Guardia: 🚨 EN RIESGO (Falta S/ {max(0.0, PISO_DIARIO - produccion_guardia):.2f})"
 
 st.markdown(
     f"""
@@ -365,8 +339,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-
 
 # ==============================================================================
 # PESTAÑAS PRINCIPALES
@@ -410,7 +382,6 @@ with tab_reg:
                     
                     st.success("¡Datos listos!")
 
-    # Formulario original
     with st.form("form_registro_viaje"):
         c1, c2 = st.columns(2)
         with c1:
@@ -441,7 +412,6 @@ with tab_reg:
         monto_total = produccion_neta + reembolsos
         st.markdown(f"**Neta:** S/ {produccion_neta:.2f} | **Total a Rendir:** S/ {monto_total:.2f}")
 
-        # LÍNEA 612 ORIGINAL CON CONTROL DE TIMEOUT
         submit_guardar = st.form_submit_button("💾 Guardar Viaje")
         if submit_guardar:
             if not id_servicio:
@@ -482,7 +452,6 @@ with tab_reg:
                     "comentarios": str(comentarios).strip()
                 }
 
-                # Guardado y sincronización con timeout protegido (4 seg)
                 guardar_viaje_remoto(datos_guardar)
                 st.session_state.uploader_key += 1
                 st.session_state.form_datos = {
@@ -547,10 +516,9 @@ with tab_guardia:
     st.info(f"Total Proyectado en Preasignados: **S/ {sum(st.session_state.preasignados.values()):.2f}**")
 
 # ------------------------------------------------------------------------------
-# PESTAÑA 4: HISTORIAL (EL FRAGMENTO RECUPERADO)
+# PESTAÑA 4: HISTORIAL
 # ------------------------------------------------------------------------------
 with tab_hist:
-    # Bloque de importación y sincronización de resúmenes
     with st.expander("📥 Importar o Sincronizar Resúmenes Masivos"):
         resumen_file = st.file_uploader("Subir CSV o Excel con producción por fecha:", type=["csv", "xlsx"])
         if resumen_file is not None:
