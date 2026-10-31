@@ -43,7 +43,7 @@ META_SEMANAL = 2250.00
 BONO_MONTO = 100.00
 PISO_DIARIO = 300.00
 META_DIARIA_TOP = 450.00
-HORA_CORTE_GUARDIA = 17  # 17:00 (5:00 p. m.): inicio formal de la nueva guardia
+HORA_CORTE_GUARDIA = 17  # 17:00 (5:00 p. m.): inicio formal del turno nocturno
 
 # ==============================================================================
 # GESTIÓN DE TIEMPO Y PERSISTENCIA (OFFLINE FIRST)
@@ -52,7 +52,7 @@ def calcular_fecha_operativa(dt_obj):
     """
     Regla de turno nocturno:
     Antes de las 17:00 (5:00 p. m.) sigue perteneciendo a la guardia iniciada la tarde anterior.
-    A las 17:00 en punto arranca formalmente la nueva guardia.
+    A las 17:00 en punto arranca la nueva guardia.
     """
     if dt_obj.hour < HORA_CORTE_GUARDIA:
         return (dt_obj - timedelta(days=1)).date()
@@ -128,7 +128,7 @@ def eliminar_viaje_remoto(id_servicio):
 # EXTRACCIÓN OCR CON INTELIGENCIA ARTIFICIAL (OPTIMIZADA)
 # ==============================================================================
 def optimizar_imagen(imagen_file):
-    """Reorienta y redimensiona la captura a un tamaño ligero para subida ultra rápida."""
+    """Reorienta y redimensiona la captura para una subida ultra rápida."""
     img = Image.open(imagen_file)
     img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
@@ -151,7 +151,6 @@ def extraer_datos_con_ia(imagen_file):
         return None
     try:
         img_optimizada = optimizar_imagen(imagen_file)
-        
         prompt = """
         Eres un asistente experto analizando tickets y capturas de viajes de taxi corporativo y aplicativos en Perú.
         Extrae los siguientes datos con máxima precisión y responde estrictamente en formato JSON válido:
@@ -171,7 +170,6 @@ def extraer_datos_con_ia(imagen_file):
         }
         Solo devuelve el JSON sin bloques Markdown adicionales ni explicaciones.
         """
-        
         modelos = ["gemini-3.8-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-2.0-flash"]
         response = None
         for nombre_mod in modelos:
@@ -259,7 +257,7 @@ if not df_all.empty and "semana_operativa" in df_all.columns:
 else:
     acumulado_semana = 0.0
 
-# Filtrado limpio de la fecha operativa actual (los 10 primeros caracteres YYYY-MM-DD)
+# Filtrado limpio de la fecha operativa actual
 if not df_all.empty and "fecha_operativa" in df_all.columns:
     df_hoy = df_all[df_all["fecha_operativa"].astype(str).str.slice(0, 10) == fecha_hoy_str]
     total_hoy_hecho = float(df_hoy["produccion_neta"].sum()) if not df_hoy.empty else 0.0
@@ -274,7 +272,15 @@ porcentaje_avance = min(100.0, (acumulado_con_preasig / META_SEMANAL) * 100.0) i
 
 produccion_guardia = total_hoy_hecho + suma_preasig
 
-# Hitos del ciclo 5x2 (1: 450, 2: 900, 3: 1350, 4: 1800, 5: 2250)
+# Conteo dinámico de guardias efectivas trabajadas en la semana
+if not df_all.empty and "semana_operativa" in df_all.columns and "fecha_operativa" in df_all.columns:
+    df_sem_rep = df_all[df_all["semana_operativa"] == semana_seleccionada]
+    fechas_efectivas = df_sem_rep.groupby("fecha_operativa")["produccion_neta"].sum()
+    guardias_trabajadas = int(len(fechas_efectivas[fechas_efectivas > 0]))
+else:
+    guardias_trabajadas = 0
+
+# Hitos del ciclo 5x2
 HITOS_ACUMULADOS = {
     1: 450.00,
     2: 900.00,
@@ -282,49 +288,87 @@ HITOS_ACUMULADOS = {
     4: 1800.00,
     5: 2250.00
 }
-
-dia_ciclo = min(5, max(1, fecha_op_hoy.isoweekday()))
-hito_hoy = HITOS_ACUMULADOS.get(dia_ciclo, 2250.00)
+dia_evaluado = min(5, max(1, guardias_trabajadas + (1 if produccion_guardia > 0 else 0)))
+hito_actual = HITOS_ACUMULADOS.get(dia_evaluado, 2250.00)
 
 # ==============================================================================
-# HERO CARD TÁCTICA - SEMÁFORO DIARIO Y RITMO 5x2 (ÚNICA INSTANCIA)
+# EVALUACIÓN DE ESTADO TÁCTICO (OPCIÓN B: DETECCIÓN INTELIGENTE DE DESCANSO)
 # ==============================================================================
-if (produccion_guardia >= META_DIARIA_TOP) or (acumulado_con_preasig >= hito_hoy) or (acumulado_con_preasig >= META_SEMANAL):
+# Si son más de las 17:00 y no hay servicios, consulta de arranque rápido
+es_horario_nocturno = (ahora_pe.hour >= HORA_CORTE_GUARDIA or ahora_pe.hour < 5)
+
+if es_horario_nocturno and produccion_guardia == 0.0:
+    st.markdown("###### ⏰ Estado de Turno")
+    modo_guardia_sel = st.radio(
+        "¿Inicias guardia esta noche?",
+        ["🟢 Sí, salgo a ruta (Asegurar Piso S/ 300)", "🔵 No, hoy es mi descanso"],
+        horizontal=True,
+        index=0,
+        label_visibility="collapsed"
+    )
+    usuario_declara_descanso = "No, hoy es mi descanso" in modo_guardia_sel
+else:
+    usuario_declara_descanso = False
+
+# Semáforo adaptable
+if acumulado_con_preasig >= META_SEMANAL:
     bg_card = "#103820"
     border_card = "#2e7d32"
     badge_color = "#81c784"
-    if acumulado_con_preasig >= META_SEMANAL:
-        estado_meta_txt = "🟢 META SEMANAL CUBIERTA"
-    elif acumulado_con_preasig >= hito_hoy and produccion_guardia < META_DIARIA_TOP:
-        estado_meta_txt = f"🟢 RITMO TOP (Supera hito Día {dia_ciclo}: S/ {hito_hoy:.0f})"
-    else:
-        estado_meta_txt = "🟢 META DIARIA CUMPLIDA (S/ 450+)"
+    estado_meta_txt = "🟢 META SEMANAL CUBIERTA"
+    txt_piso_hoy = "Piso Guardia: ✅ SEMANA CUMPLIDA"
+
+elif produccion_guardia >= META_DIARIA_TOP:
+    bg_card = "#103820"
+    border_card = "#2e7d32"
+    badge_color = "#81c784"
+    estado_meta_txt = "🟢 META DIARIA CUMPLIDA (S/ 450+)"
+    txt_piso_hoy = "Piso Guardia: ✅ ASEGURADO"
+
 elif produccion_guardia >= PISO_DIARIO:
     bg_card = "#3d2b05"
     border_card = "#f57f17"
     badge_color = "#ffd54f"
     falta_top = META_DIARIA_TOP - produccion_guardia
     estado_meta_txt = f"🟡 PISO ASEGURADO (Falta S/ {falta_top:.2f} para S/ 450)"
-else:
+    txt_piso_hoy = "Piso Guardia: ✅ ASEGURADO"
+
+elif usuario_declara_descanso or (not es_horario_nocturno and produccion_guardia == 0.0):
+    # Modo Descanso (Opción B)
+    bg_card = "#102a43"
+    border_card = "#2196f3"
+    badge_color = "#64b5f6"
+    estado_meta_txt = f"🔵 MODO DESCANSO ({guardias_trabajadas}/5 guardias cumplidas)"
+    txt_piso_hoy = f"Colchón acumulado: S/ {acumulado_con_preasig:.2f} de S/ {META_SEMANAL:.0f}"
+
+elif produccion_guardia > 0.0:
+    # Guardia activa buscando el piso
     bg_card = "#3b1111"
     border_card = "#c62828"
     badge_color = "#ef9a9a"
     falta_piso = PISO_DIARIO - produccion_guardia
-    estado_meta_txt = f"🔴 PISO EN RIESGO (Falta S/ {falta_piso:.2f} para S/ 300)"
+    estado_meta_txt = f"🔴 PISO EN CURSO (Falta S/ {falta_piso:.2f} para S/ 300)"
+    txt_piso_hoy = f"Piso Guardia: 🚨 EN RIESGO (Falta S/ {falta_piso:.2f})"
 
-txt_piso_hoy = "Piso Guardia: ✅ ASEGURADO" if produccion_guardia >= PISO_DIARIO else f"Piso Guardia: 🚨 EN RIESGO (Falta S/ {max(0.0, PISO_DIARIO - produccion_guardia):.2f})"
+else:
+    # Horario nocturno listo para arrancar
+    bg_card = "#3b1111"
+    border_card = "#c62828"
+    badge_color = "#ef9a9a"
+    estado_meta_txt = "🔴 GUARDIA POR INICIAR | Objetivo: Piso S/ 300.00"
+    txt_piso_hoy = "Piso Guardia: 🚨 EN RIESGO (Falta S/ 300.00)"
 
 st.markdown(
     f"""
     <div style="background-color: {bg_card}; padding: 16px; border-radius: 12px; border: 2px solid {border_card}; margin-bottom: 14px;">
         <div style="font-size: 13px; font-weight: 700; color: {badge_color}; margin-bottom: 6px;">
-            🚖 GUARDIA EN CURSO | {estado_meta_txt}
+            🚖 CONTROL TÁCTICO | {estado_meta_txt}
         </div>
         <div style="font-size: 26px; font-weight: 800; color: #ffffff; margin-bottom: 2px;">
             S/ {acumulado_con_preasig:.2f} <span style="font-size: 15px; font-weight: 500; color: #e0e0e0;">de S/ {META_SEMANAL:.0f} (Bono {BONO_MONTO:.0f})</span>
         </div>
         <div style="font-size: 12px; color: {badge_color}; margin-bottom: 8px;">
-            Pendiente semanal: S/ {faltante_semana:.2f} ({porcentaje_avance:.1f}% avance) | Día {dia_ciclo} (Hito: S/ {hito_hoy:.0f})
+            Pendiente semanal: S/ {faltante_semana:.2f} ({porcentaje_avance:.1f}% avance) | Guardia {dia_evaluado} de 5 (Hito: S/ {hito_actual:.0f})
         </div>
         <div style="font-size: 13px; color: #ffffff; margin-bottom: 4px;">
             Hoy Hecho: S/ {total_hoy_hecho:.2f} | Preasig: S/ {suma_preasig:.2f} | Total Hoy Proyectado: <b>S/ {produccion_guardia:.2f}</b>
@@ -589,7 +633,7 @@ with tab_guardia:
                     <div style="background-color: #1a1c24; padding: 12px 16px; border-radius: 8px; margin-bottom: 8px; border-left: 5px solid {'#2e7d32' if neto_val>=450 else ('#f57f17' if neto_val>=300 else '#c62828')};">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                             <span style="font-weight: 700; font-size: 15px; color: #ffffff;">
-                                Día {idx} ({nombre_dia} {f_str})
+                                Guardia {idx} ({nombre_dia} {f_str})
                             </span>
                             <span style="font-size: 13px; font-weight: 600; color: #e0e0e0;">
                                 {icono} {estado_dia}
