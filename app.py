@@ -472,13 +472,12 @@ with tab_reg:
                 st.rerun()
 
 # ------------------------------------------------------------------------------
-# PESTAÑA 2: ABONOS (CON FORMATO RÁPIDO PARA COPIAR: SERVICIO - MÓVIL)
+# PESTAÑA 2: ABONOS (CON GENERADOR DE TEXTO PARA COPIAR SERVICIO - MÓVIL)
 # ------------------------------------------------------------------------------
 with tab_abonos:
     st.subheader("💵 Control de Abonos y Cobranzas en Ruta")
-    st.caption("Seguimiento de efectivo/billeteras y generación de texto para constancia de abono.")
+    st.caption("Seguimiento del dinero en efectivo y billeteras digitales (Yape/Plin) a rendir.")
     
-    # Número de móvil predeterminado (puedes editarlo o dejarlo fijo)
     NUMERO_MOVIL_DEFAULT = "2986"
 
     if not df_all.empty:
@@ -510,12 +509,11 @@ with tab_abonos:
             if servicio_sel:
                 texto_abono = f"{servicio_sel.strip()} - {nro_movil.strip()}"
                 st.markdown("**Texto generado para comprobante:**")
-                # st.code muestra el botón nativo de copia al portapapeles en Streamlit
                 st.code(texto_abono, language="text")
-                st.caption("👉 Toca el icono de copiar a la derecha del cuadro para pegarlo directamente en Yape/Plin/Transferencia.")
+                st.caption("👉 Toca el botón de copiar a la derecha del cuadro para pegarlo directamente en tu comprobante.")
             
             st.divider()
-            
+
             st.markdown("##### Detalle de Servicios con Cobro Directo")
             cols_ab = ["id_servicio", "fecha_operativa", "metodo_pago", "monto_total", "abono_enviado"]
             st.dataframe(df_cobranzas[[c for c in cols_ab if c in df_cobranzas.columns]].iloc[::-1], use_container_width=True, hide_index=True)
@@ -524,10 +522,8 @@ with tab_abonos:
     else:
         st.info("Sin registros de servicios.")
 
-
-
 # ------------------------------------------------------------------------------
-# PESTAÑA 3: GUARDIA & METAS (PREASIGNADOS)
+# PESTAÑA 3: GUARDIA & METAS (PREASIGNADOS + RESUMEN DIARIO POR GUARDIA)
 # ------------------------------------------------------------------------------
 with tab_guardia:
     st.subheader("Control de Preasignados de la Guardia")
@@ -543,10 +539,129 @@ with tab_guardia:
         
     st.info(f"Total Proyectado en Preasignados: **S/ {sum(st.session_state.preasignados.values()):.2f}**")
 
+    st.divider()
+
+    # --- RESUMEN HISTÓRICO DE GUARDIAS DE LA SEMANA ---
+    st.subheader(f"📊 Resumen por Guardia ({semana_seleccionada})")
+    
+    if not df_all.empty and "semana_operativa" in df_all.columns:
+        df_sem_rep = df_all[df_all["semana_operativa"] == semana_seleccionada].copy()
+        
+        if not df_sem_rep.empty and "fecha_operativa" in df_sem_rep.columns:
+            resumen_dias = (
+                df_sem_rep.groupby("fecha_operativa")
+                .agg(
+                    total_viajes=("id_servicio", "count"),
+                    neto_sin_peajes=("produccion_neta", "sum")
+                )
+                .reset_index()
+                .sort_values("fecha_operativa", ascending=True)
+            )
+
+            dias_nombre = {
+                1: "Lunes", 2: "Martes", 3: "Miércoles",
+                4: "Jueves", 5: "Viernes", 6: "Sábado", 7: "Domingo"
+            }
+
+            for idx, fila in enumerate(resumen_dias.itertuples(), start=1):
+                f_str = str(fila.fecha_operativa)[:10]
+                try:
+                    f_dt = datetime.strptime(f_str, "%Y-%m-%d").date()
+                    nombre_dia = dias_nombre.get(f_dt.isoweekday(), "")
+                except Exception:
+                    nombre_dia = ""
+
+                neto_val = float(fila.neto_sin_peajes)
+                viajes_cant = int(fila.total_viajes)
+
+                if neto_val >= 450.0:
+                    icono = "🟢"
+                    estado_dia = "Meta Superada"
+                elif neto_val >= 300.0:
+                    icono = "🟡"
+                    estado_dia = "Piso Asegurado"
+                else:
+                    icono = "🔴"
+                    estado_dia = f"Faltó S/ {300.0 - neto_val:.2f}"
+
+                st.markdown(
+                    f"""
+                    <div style="background-color: #1a1c24; padding: 12px 16px; border-radius: 8px; margin-bottom: 8px; border-left: 5px solid {'#2e7d32' if neto_val>=450 else ('#f57f17' if neto_val>=300 else '#c62828')};">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-weight: 700; font-size: 15px; color: #ffffff;">
+                                Día {idx} ({nombre_dia} {f_str})
+                            </span>
+                            <span style="font-size: 13px; font-weight: 600; color: #e0e0e0;">
+                                {icono} {estado_dia}
+                            </span>
+                        </div>
+                        <div style="margin-top: 4px; font-size: 14px; color: #bdbdbd;">
+                            🚖 <b>{viajes_cant} viaje{'s' if viajes_cant != 1 else ''}</b> | Neto: <b style="color: #ffffff;">S/ {neto_val:.2f}</b> (sin peajes)
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+        else:
+            st.info("No hay viajes registrados en la semana seleccionada.")
+    else:
+        st.info("Sin registros de viajes disponibles.")
+
 # ------------------------------------------------------------------------------
-# PESTAÑA 4: HISTORIAL
+# PESTAÑA 4: HISTORIAL (CON MÓDULO RETROACTIVO CDS / INSTRUCTOR - S/ 450.00)
 # ------------------------------------------------------------------------------
 with tab_hist:
+    # 1. Registro directo de jornadas especiales retroactivas
+    with st.expander("🎓 Registrar Jornada Especial Retroactiva (CDS / Instructor - S/ 450.00)"):
+        st.caption("Acredita S/ 450.00 exactos para fechas anteriores sin alterar la guardia en curso.")
+        c_esp1, c_esp2 = st.columns(2)
+        with c_esp1:
+            fecha_retro = st.date_input(
+                "Fecha de la jornada realizada:", 
+                value=ahora_pe.date() - timedelta(days=1)
+            )
+            rol_especial = st.selectbox(
+                "Rol desempeñado:", 
+                ["Conductor CDS", "Instructor"]
+            )
+        with c_esp2:
+            st.info("💡 Acredita automáticamente **S/ 450.00** de producción neta para esa fecha y suma al acumulado semanal.")
+            coment_esp = st.text_input("Comentario / Detalle:", value=f"Jornada completa {rol_especial}")
+
+        if st.button(f"💾 Guardar Jornada como {rol_especial} (S/ 450.00)", use_container_width=True):
+            f_op_retro = fecha_retro
+            sem_op_retro = obtener_semana_operativa(f_op_retro)
+            prefijo = "CDS" if "CDS" in rol_especial else "INST"
+            id_gen = f"{prefijo}-{f_op_retro.strftime('%Y%m%d')}"
+
+            dict_jornada = {
+                "id_servicio": id_gen,
+                "fecha_hora_viaje": f"{f_op_retro} 12:00:00",
+                "fecha_operativa": str(f_op_retro),
+                "semana_operativa": str(sem_op_retro),
+                "tipo_asignacion": "Directo",
+                "tipo_usuario": "Empresa",
+                "categoria_servicio": rol_especial,
+                "metodo_pago": "Empresa",
+                "origen": "Base / Sede",
+                "destino": "Ruta / Operaciones",
+                "distancia_km": 0.0,
+                "duracion_min": 0.0,
+                "tarifa_base": 450.00,
+                "monto_recargos": 0.0,
+                "monto_reembolsos": 0.0,
+                "produccion_neta": 450.00,
+                "monto_total": 450.00,
+                "abono_enviado": 0,
+                "fecha_hora_abono": "",
+                "comentarios": coment_esp.strip()
+            }
+
+            guardar_viaje_remoto(dict_jornada)
+            st.success(f"¡Día {f_op_retro} registrado con éxito como {rol_especial} (S/ 450.00)!")
+            st.rerun()
+
+    # 2. Sincronización masiva de resúmenes anteriores
     with st.expander("📥 Importar o Sincronizar Resúmenes Masivos"):
         resumen_file = st.file_uploader("Subir CSV o Excel con producción por fecha:", type=["csv", "xlsx"])
         if resumen_file is not None:
@@ -591,6 +706,7 @@ with tab_hist:
                 except Exception as e:
                     st.error(f"Error al sincronizar: {e}")
 
+    # 3. Visualización y descarga del Historial
     df_all = cargar_viajes()
 
     if not df_all.empty and "id_servicio" in df_all.columns:
